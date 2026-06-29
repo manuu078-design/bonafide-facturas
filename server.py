@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 Bonafide Facturas – Servidor local
@@ -63,6 +64,10 @@ class Handler(BaseHTTPRequestHandler):
         headers = {
             "Content-Type": "application/json",
             "Accept":       "application/json",
+            # Simular pedido desde el navegador de Nucleo (necesario para evitar 403)
+            "Origin":       "https://prod.nucleocheck.com",
+            "Referer":      "https://prod.nucleocheck.com/",
+            "User-Agent":   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
         # Forward auth token from incoming request
         auth = self.headers.get("Authorization") or self.headers.get("authorization")
