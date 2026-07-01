@@ -261,7 +261,7 @@
       </div>
     </div>
     <div class="col-lg-4">
-      <div class="card">
+      <div class="card mb-3">
         <div class="card-body">
           <h6 class="fw-bold mb-3"><i class="bi bi-question-circle text-info me-2"></i>Cómo usar</h6>
           <ol class="small text-muted ps-3">
@@ -269,7 +269,7 @@
             <li class="mb-2">Hacé click en <strong>Conectar</strong> para obtener el token automáticamente.</li>
             <li class="mb-2">Subí una factura PDF desde <strong>Nueva Factura</strong>.</li>
             <li class="mb-2">Revisá los datos extraídos y editá lo que sea necesario.</li>
-            <li class="mb-2">Mapeá los artículos a ingredientes de Nucleo.</li>
+            <li class="mb-2">Asignale un ingrediente Nucleo a cada artículo — se memoriza automáticamente.</li>
             <li class="mb-2">Enviá el gasto y/o actualizá el stock con un click.</li>
           </ol>
           <hr>
@@ -277,6 +277,18 @@
             <i class="bi bi-shield-check text-success me-1"></i>
             Todo se guarda localmente en tu navegador. Nada se envía a terceros.
           </p>
+        </div>
+      </div>
+      <!-- Mapeos guardados -->
+      <div class="card">
+        <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+          <h6 class="mb-0 fw-bold"><i class="bi bi-pin-map text-success me-2"></i>Mapeos guardados</h6>
+          <button class="btn btn-sm btn-outline-danger" onclick="clearAllMappings()">
+            <i class="bi bi-trash3 me-1"></i>Borrar todos
+          </button>
+        </div>
+        <div class="card-body p-0">
+          <div id="mappings-list"></div>
         </div>
       </div>
     </div>
@@ -297,10 +309,15 @@
         <input type="text" id="ing-search" class="form-control mb-3" placeholder="Buscar ingrediente...">
         <div id="ing-list" style="max-height:320px;overflow-y:auto"></div>
       </div>
-      <div class="modal-footer">
-        <button class="btn btn-sm btn-outline-danger" onclick="clearIngredient()">
-          <i class="bi bi-x-circle me-1"></i>Quitar mapeo
-        </button>
+      <div class="modal-footer justify-content-between">
+        <div class="d-flex gap-2">
+          <button class="btn btn-sm btn-outline-secondary" onclick="clearIngredientOnly()" title="Quitar solo de esta factura">
+            <i class="bi bi-x me-1"></i>Quitar del item
+          </button>
+          <button class="btn btn-sm btn-outline-danger" onclick="clearIngredient()" title="Quitar y borrar el mapeo guardado">
+            <i class="bi bi-trash3 me-1"></i>Borrar mapeo
+          </button>
+        </div>
         <button class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
       </div>
     </div>
@@ -318,9 +335,10 @@
 const IS_PROXIED = location.protocol !== 'file:';
 const API = IS_PROXIED ? '' : 'https://api-prod.nucleocheck.com';
 let state = {
-  locations: [],   // [{id,name,email,password,jwt,companyName,companyId,cashDrawerId}]
-  invoices:  [],   // [{id,locId,supplier,number,date,total,status,expenseNucleoId,items:[],rawText}]
+  locations: [],        // [{id,name,email,password,jwt,companyName,companyId,cashDrawerId}]
+  invoices:  [],        // [{id,locId,supplier,number,date,total,status,expenseNucleoId,items:[],rawText}]
   nextId: 1,
+  productMappings: {},  // { "código6dígitos": { ingId, ingName } } — persiste entre sesiones
 };
 let currentInvId = null;
 let activeIngRowEl = null;
@@ -649,7 +667,10 @@ async function processUpload() {
       locId, supplier: meta.supplier, number: meta.number,
       date: meta.date, total: meta.total, status: 'pending',
       expenseNucleoId: null, rawText,
-      items: meta.items.map((it,i) => ({...it, id: i}))
+      items: meta.items.map((it,i) => {
+        const m = (state.productMappings||{})[it.code];
+        return { ...it, id: i, ingId: m?.ingId||null, ingName: m?.ingName||'' };
+      })
     };
     state.invoices.unshift(inv);
     saveState();
@@ -710,6 +731,9 @@ function renderItemsTable(items) {
         <input type="text" class="form-control form-control-sm item-ing-name" value="${esc(it.ingName||'')}"
                placeholder="Buscar ingrediente..." readonly style="background:#fff;cursor:pointer"
                onclick="openIngPicker(this)">
+        ${it.ingId && it.code && (state.productMappings||{})[it.code]?.ingId === it.ingId
+          ? '<div class="text-success" style="font-size:0.72em;margin-top:2px"><i class="bi bi-pin-fill"></i> Memorizado</div>'
+          : ''}
       </td>
       <td><button class="btn btn-sm btn-outline-danger" onclick="this.closest('tr').remove()">
         <i class="bi bi-trash3"></i></button></td>
@@ -956,11 +980,21 @@ function selectIng(id, name) {
   if (!activeIngRowEl) return;
   activeIngRowEl.querySelector('.item-ing-id').value = id;
   activeIngRowEl.querySelector('.item-ing-name').value = name;
+  // Guardar mapeo permanente: código producto → ingrediente Nucleo
+  const code = activeIngRowEl.querySelector('.item-code')?.value?.trim();
+  if (code) {
+    if (!state.productMappings) state.productMappings = {};
+    const isNew = !state.productMappings[code];
+    state.productMappings[code] = { ingId: id, ingName: name };
+    saveState();
+    showToast(isNew ? `📌 Mapeo guardado: ${code} → ${name}` : `📌 Mapeo actualizado: ${code} → ${name}`, 'success');
+  }
   bootstrap.Modal.getInstance(document.getElementById('ingModal')).hide();
   activeIngRowEl = null;
 }
 
-function clearIngredient() {
+function clearIngredientOnly() {
+  // Quita el ingrediente de ESTE item sin borrar el mapeo guardado
   if (!activeIngRowEl) return;
   activeIngRowEl.querySelector('.item-ing-id').value = '';
   activeIngRowEl.querySelector('.item-ing-name').value = '';
@@ -968,9 +1002,83 @@ function clearIngredient() {
   activeIngRowEl = null;
 }
 
+function clearIngredient() {
+  // Quita el ingrediente Y borra el mapeo guardado para este código
+  if (!activeIngRowEl) return;
+  const code = activeIngRowEl.querySelector('.item-code')?.value?.trim();
+  activeIngRowEl.querySelector('.item-ing-id').value = '';
+  activeIngRowEl.querySelector('.item-ing-name').value = '';
+  if (code && state.productMappings?.[code]) {
+    delete state.productMappings[code];
+    saveState();
+    showToast(`🗑️ Mapeo de código ${code} eliminado`, 'info');
+  }
+  bootstrap.Modal.getInstance(document.getElementById('ingModal')).hide();
+  activeIngRowEl = null;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // SETTINGS
 // ═══════════════════════════════════════════════════════════════════════
+// ── Mapeos de productos ──────────────────────────────────────────────────
+function renderMappings() {
+  const cont = document.getElementById('mappings-list');
+  if (!cont) return;
+  const mappings = state.productMappings || {};
+  const entries = Object.entries(mappings);
+  if (!entries.length) {
+    cont.innerHTML = `<div class="text-muted text-center py-4 small px-3">
+      <i class="bi bi-pin-map fs-3 d-block mb-2 opacity-50"></i>
+      Sin mapeos todavía.<br>
+      Al asignar un ingrediente a un artículo, el código se memoriza automáticamente para facturas futuras.
+    </div>`;
+    return;
+  }
+  cont.innerHTML = `<table class="table table-sm table-hover mb-0">
+    <thead class="table-light">
+      <tr>
+        <th class="ps-3 small text-muted">Código</th>
+        <th class="small text-muted">Ingrediente Nucleo</th>
+        <th class="pe-3"></th>
+      </tr>
+    </thead>
+    <tbody>
+      ${entries.sort((a,b)=>a[0].localeCompare(b[0])).map(([code, m]) => `<tr>
+        <td class="ps-3 font-monospace small fw-semibold">${esc(code)}</td>
+        <td class="small"><i class="bi bi-check-circle-fill text-success me-1"></i>${esc(m.ingName)}</td>
+        <td class="pe-3 text-end">
+          <button class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:.78em"
+                  onclick="deleteMapping('${code.replace(/'/g,"\\'")}')">
+            <i class="bi bi-trash3"></i>
+          </button>
+        </td>
+      </tr>`).join('')}
+    </tbody>
+  </table>
+  <div class="px-3 py-2 text-muted small border-top">
+    <i class="bi bi-info-circle me-1"></i>${entries.length} mapeo${entries.length!==1?'s':''} guardado${entries.length!==1?'s':''}
+  </div>`;
+}
+
+function deleteMapping(code) {
+  if (!state.productMappings) return;
+  delete state.productMappings[code];
+  saveState();
+  renderMappings();
+  showToast(`🗑️ Mapeo de código ${code} eliminado`, 'info');
+}
+
+function clearAllMappings() {
+  if (!Object.keys(state.productMappings||{}).length) {
+    showToast('No hay mapeos guardados.', 'info'); return;
+  }
+  if (!confirm(`¿Borrar los ${Object.keys(state.productMappings).length} mapeos guardados?`)) return;
+  state.productMappings = {};
+  saveState();
+  renderMappings();
+  showToast('Todos los mape:t am;ron eliminados.', 'info');
+}
+
 function renderSettings() {
   const cont = document.getElementById('locations-list');
   if (!state.locations.length) {
@@ -1027,6 +1135,7 @@ function renderSettings() {
         </details>
       </div>
     </div>`).join('');
+  renderMappings();
 }
 
 async function connectNucleo(locId) {
