@@ -176,6 +176,7 @@
                   <th>Descripción</th>
                   <th style="width:80px">Cant.</th>
                   <th style="width:65px">UM</th>
+                  <th style="width:110px" title="Cantidad que impacta en el stock de Nucleo, en la unidad del ingrediente (ej. gramos). Se memoriza la conversión por producto.">Cant. stock</th>
                   <th style="width:190px">Ingrediente Nucleo</th>
                   <th style="width:36px"></th>
                 </tr>
@@ -454,15 +455,17 @@ async function getExpenseOptions(jwt) {
 }
 
 async function createExpense(jwt, typeId, desc, total, cashDrawerId) {
-  const r = await nucleoReq('POST','Expense/Create',{
+  // Endpoint real de NucleoCheck: Expense/SaveExpense
+  // DTO: { ExpenseTypeId, Description, Amount, CashDrawerId }
+  const r = await nucleoReq('POST','Expense/SaveExpense',{
     ExpenseTypeId: typeId,
     Description: desc,
-    Total: parseFloat(total),
-    CashDrawerId: cashDrawerId || 1,
-    Date: new Date().toISOString()
+    Amount: parseFloat(total),
+    CashDrawerId: cashDrawerId || 1
   }, jwt);
-  if (r.status === 200 || r.status === 201) return r.data;
-  throw new Error('Error creando gasto (' + r.status + '): ' + JSON.stringify(r.data).slice(0,120));
+  const errs = r.data && r.data.ValidationResult && r.data.ValidationResult.ErrorMessages;
+  if ((r.status === 200 || r.status === 201) && (!errs || errs.length === 0)) return r.data;
+  throw new Error('Error creando gasto (' + r.status + '): ' + (errs && errs.length ? errs.join(', ') : JSON.stringify(r.data).slice(0,120)));
 }
 
 async function getIngredients(jwt, locId) {
@@ -737,7 +740,8 @@ async function processUpload() {
       expenseNucleoId: null, rawText,
       items: meta.items.map((it,i) => {
         const m = (state.productMappings||{})[it.code];
-        return { ...it, id: i, ingId: m?.ingId||null, ingName: m?.ingName||'' };
+        return { ...it, id: i, ingId: m?.ingId||null, ingName: m?.ingName||'',
+                 stockQty: (m?.factor && it.quantity) ? +((m.factor*it.quantity).toFixed(3)) : 0 };
       })
     };
     state.invoices.unshift(inv);
@@ -794,6 +798,9 @@ function renderItemsTable(items) {
       <td><input type="text" class="form-control form-control-sm item-desc" value="${esc(it.description||'')}"></td>
       <td><input type="number" class="form-control form-control-sm item-qty" value="${it.quantity||''}" step="any"></td>
       <td><input type="text" class="form-control form-control-sm item-unit" value="${esc(it.unit||'CAJ')}" style="width:60px"></td>
+      <td><input type="number" class="form-control form-control-sm item-stock-qty" step="any"
+                 value="${it.stockQty ?? (((state.productMappings||{})[it.code]?.factor && it.quantity) ? +( (state.productMappings[it.code].factor * it.quantity).toFixed(3) ) : '')}"
+                 placeholder="p/ stock" title="Cantidad que suma al stock en Nucleo (en la unidad del ingrediente, ej. gramos)"></td>
       <td>
         <input type="hidden" class="item-ing-id" value="${it.ingId||''}">
         <input type="text" class="form-control form-control-sm item-ing-name" value="${esc(it.ingName||'')}"
@@ -815,6 +822,7 @@ function addItemRow() {
     <td><input type="text" class="form-control form-control-sm item-desc" value=""></td>
     <td><input type="number" class="form-control form-control-sm item-qty" value="" step="any"></td>
     <td><input type="text" class="form-control form-control-sm item-unit" value="CAJ" style="width:60px"></td>
+    <td><input type="number" class="form-control form-control-sm item-stock-qty" value="" step="any" placeholder="p/ stock"></td>
     <td>
       <input type="hidden" class="item-ing-id" value="">
       <input type="text" class="form-control form-control-sm item-ing-name" value=""
@@ -838,6 +846,7 @@ function getItemsFromTable() {
       description: desc,
       quantity: parseFloat(row.querySelector('.item-qty').value) || 0,
       unit: row.querySelector('.item-unit').value.trim() || 'CAJ',
+      stockQty: parseFloat(row.querySelector('.item-stock-qty')?.value) || 0,
       ingId: row.querySelector('.item-ing-id').value ? parseInt(row.querySelector('.item-ing-id').value) : null,
       ingName: row.querySelector('.item-ing-name').value.trim(),
     });
@@ -968,6 +977,14 @@ async function sendStock(invId) {
   const mapped = inv.items.filter(it => it.ingId && it.quantity > 0);
   if (!mapped.length) { showToast('No hay artículos mapeados.', 'warning'); return; }
 
+  // Validar que todos tengan cantidad de stock (en la unidad del ingrediente)
+  const sinStockQty = mapped.filter(it => !(it.stockQty > 0));
+  if (sinStockQty.length) {
+    showToast('⚠️ Completá la columna "Cant. stock" (en la unidad del ingrediente, ej. gramos) para: '
+      + sinStockQty.map(i=>i.description.slice(0,25)).join(', '), 'warning');
+    return;
+  }
+
   const btn = event.target; btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Actualizando...';
   const jwt = await getValidJwt(loc);
@@ -975,13 +992,18 @@ async function sendStock(invId) {
   let ok = 0;
   for (const item of mapped) {
     try {
-      await createStockMovement(jwt, item.ingId, item.quantity,
+      await createStockMovement(jwt, item.ingId, item.stockQty,
         `Factura #${inv.number||'?'} - ${inv.supplier}`, loc.id);
       ok++;
+      // Memorizar el factor de conversión bulto→stock para este código
+      if (item.code && item.quantity > 0 && state.productMappings?.[item.code]) {
+        state.productMappings[item.code].factor = +(item.stockQty / item.quantity).toFixed(6);
+      }
     } catch(e) {
       errors.push(item.ingName + ': ' + e.message);
     }
   }
+  saveState();
   if (ok > 0) {
     inv.status = 'done';
     saveState();
@@ -1052,8 +1074,11 @@ function selectIng(id, name) {
   const code = activeIngRowEl.querySelector('.item-code')?.value?.trim();
   if (code) {
     if (!state.productMappings) state.productMappings = {};
-    const isNew = !state.productMappings[code];
-    state.productMappings[code] = { ingId: id, ingName: name };
+    const prev = state.productMappings[code];
+    const isNew = !prev;
+    // Conservar el factor de conversión si se re-selecciona el mismo ingrediente
+    state.productMappings[code] = { ingId: id, ingName: name,
+      factor: (prev && prev.ingId === id) ? prev.factor : undefined };
     saveState();
     showToast(isNew ? `📌 Mapeo guardado: ${code} → ${name}` : `📌 Mapeo actualizado: ${code} → ${name}`, 'success');
   }
