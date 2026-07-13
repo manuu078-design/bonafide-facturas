@@ -829,9 +829,48 @@ async function renderReview(invId) {
   // Items table
   renderItemsTable(inv.items);
 
+  // Completar unidades de ingredientes y recalcular sugerencias (en segundo plano)
+  backfillStockSuggestions(inv);
+
   // Side panels
   await renderExpensePanel(inv);
   renderStockPanel(inv);
+}
+
+// Busca en Nucleo la unidad real de cada ingrediente mapeado (gramos/unidades/kg),
+// la guarda en el mapeo y recalcula las sugerencias de "Cant. stock" que no
+// hayan sido editadas a mano.
+async function backfillStockSuggestions(inv) {
+  const loc = state.locations.find(l => l.id === inv.locId);
+  if (!loc || !loc.email) return;
+  try {
+    const jwt = await getValidJwt(loc);
+    const ings = await getIngredients(jwt, loc.id);
+    const byId = {};
+    ings.forEach(i => { byId[i.Id || i.id] = i; });
+
+    let changed = false;
+    for (const m of Object.values(state.productMappings || {})) {
+      const ing = m.ingId && byId[m.ingId];
+      if (ing) {
+        const u = ing.MeasurementUnitName || '';
+        if (u && m.ingUnit !== u) { m.ingUnit = u; changed = true; }
+      }
+    }
+    if (changed) saveState();
+
+    // Recalcular solo los campos automáticos (no tocar lo editado a mano)
+    document.querySelectorAll('#items-tbody tr').forEach(row => {
+      const el = row.querySelector('.item-stock-qty');
+      if (!el || (el.value && el.dataset.auto !== '1')) return;
+      const code = row.querySelector('.item-code')?.value?.trim();
+      const qty  = parseFloat(row.querySelector('.item-qty')?.value) || 0;
+      const m = (state.productMappings || {})[code];
+      if (!m || !qty) return;
+      const per = m.factor || suggestPerBulto(row.querySelector('.item-desc')?.value, m.ingUnit);
+      if (per) { el.value = +((per * qty).toFixed(3)); el.dataset.auto = '1'; }
+    });
+  } catch(e) { /* sin conexión: se mantienen las sugerencias por defecto */ }
 }
 
 function renderItemsTable(items) {
@@ -843,8 +882,8 @@ function renderItemsTable(items) {
       <td><input type="number" class="form-control form-control-sm item-qty" value="${it.quantity||''}" step="any"></td>
       <td><input type="text" class="form-control form-control-sm item-unit" value="${esc(it.unit||'CAJ')}" style="width:60px"></td>
       <td><input type="number" class="form-control form-control-sm item-stock-qty" step="any"
-                 value="${calcStockQty(it)}"
-                 placeholder="p/ stock" title="Cantidad que suma al stock en Nucleo (en la unidad del ingrediente, ej. gramos). Se calcula sola desde la descripción; revisala y corregila si hace falta."></td>
+                 value="${calcStockQty(it)}" data-auto="${it.stockQty > 0 ? '0' : '1'}" oninput="this.dataset.auto='0'"
+                 placeholder="p/ stock" title="Cantidad que suma al stock en Nucleo (en la unidad del ingrediente, ej. gramos o unidades). Se calcula sola desde la descripción; revisala y corregila si hace falta."></td>
       <td>
         <input type="hidden" class="item-ing-id" value="${it.ingId||''}">
         <input type="text" class="form-control form-control-sm item-ing-name" value="${esc(it.ingName||'')}"
