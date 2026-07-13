@@ -450,20 +450,52 @@ async function getIngredients(jwt, locId) {
   return [];
 }
 
-async function createStockMovement(jwt, ingredientId, quantity, desc) {
-  for (const path of ['IngredientStockMovement/Create','Ingredient/AddStockMovement','IngredientMovement/Create']) {
-    const r = await nucleoReq('POST', path, {
-      IngredientId: ingredientId,
-      Quantity: parseFloat(quantity),
-      Type: 'Entrada',
-      Description: desc,
-      Date: new Date().toISOString()
-    }, jwt);
-    if (r.status === 200 || r.status === 201) return r.data;
-    if (r.status === 404) continue;
-    throw new Error('Error stock (' + r.status + '): ' + JSON.stringify(r.data).slice(0,120));
+// ── Stock: endpoints reales descubiertos en el código fuente de NucleoCheck ──
+// POST IngredientStockFlow/SaveIngredientStockFlowMovement
+//   { IngredientId, FromWarehouseId, Income|Outcome, Description,
+//     ActionTypeId: 18 (StockManual), EntityTypeId: 23 (IngredientStockFlow) }
+// GET  IngredientStockFlow/GetIngredientStockFlowFilteringOptions → depósitos
+let cachedWarehouses = {};  // locId → warehouseId
+
+async function getWarehouseId(jwt, locId) {
+  if (cachedWarehouses[locId]) return cachedWarehouses[locId];
+  const r = await nucleoReq('GET','IngredientStockFlow/GetIngredientStockFlowFilteringOptions',null,jwt);
+  if (r.status === 200 && r.data && typeof r.data === 'object') {
+    // Buscar la lista de depósitos en la respuesta (el nombre exacto puede variar)
+    let list = null;
+    for (const k of Object.keys(r.data)) {
+      const v = r.data[k];
+      if (/warehouse|deposito/i.test(k) && Array.isArray(v) && v.length) { list = v; break; }
+    }
+    if (!list) {
+      // fallback: primera propiedad que sea array de objetos con Id/Value
+      for (const k of Object.keys(r.data)) {
+        const v = r.data[k];
+        if (Array.isArray(v) && v.length && typeof v[0] === 'object') { list = v; break; }
+      }
+    }
+    if (list) {
+      const f = list[0];
+      const id = f.Id ?? f.Value ?? f.id ?? f.value;
+      if (id != null) { cachedWarehouses[locId] = id; return id; }
+    }
   }
-  throw new Error('Endpoint de stock no encontrado. Contactar soporte.');
+  return 1;  // fallback: depósito por defecto
+}
+
+async function createStockMovement(jwt, ingredientId, quantity, desc, locId) {
+  const warehouseId = await getWarehouseId(jwt, locId);
+  const r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',{
+    IngredientId   : ingredientId,
+    FromWarehouseId: warehouseId,
+    Income         : parseFloat(quantity),   // entrada de stock
+    Description    : desc,
+    ActionTypeId   : 18,   // StockManual
+    EntityTypeId   : 23    // IngredientStockFlow
+  }, jwt);
+  const errs = r.data && r.data.ValidationResult && r.data.ValidationResult.ErrorMessages;
+  if ((r.status === 200 || r.status === 201) && (!errs || errs.length === 0)) return r.data;
+  throw new Error('Error stock (' + r.status + '): ' + (errs && errs.length ? errs.join(', ') : JSON.stringify(r.data).slice(0,120)));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -546,31 +578,37 @@ function parseInvoiceText(text) {
     const code = codeM[1];
     const rest = c.substring(codeM[0].length);
 
-    // All monetary values in this chunk  (Argentine format: 1.234.567,89)
-    const amounts = [];
-    const amtRe = /\b(\d{1,3}(?:\.\d{3})*,\d{2})\b/g;
-    let am;
-    while ((am = amtRe.exec(rest)) !== null) amounts.push(parseArgNum(am[1]));
+    // 1) Buscar la ÚLTIMA aparición de "cantidad + unidad" en TODO el chunk.
+    //    (No cortamos por el primer "precio": las descripciones pueden tener
+    //    decimales como "SOB.X 6,25 GR." que parecen montos.)
+    const qtyRe = /(\d+)\s*(BOL|CAJ|DP|KG|UN|UNI|PAQ|BID|LAT)\b/gi;
+    let qm, lastQm = null;
+    while ((qm = qtyRe.exec(rest)) !== null) lastQm = qm;
 
+    let qty = 1, unit = 'CAJ', desc, priceSec;
+    if (lastQm) {
+      qty  = parseInt(lastQm[1]) || 1;
+      unit = lastQm[2].toUpperCase();
+      desc     = rest.slice(0, lastQm.index);
+      priceSec = rest.slice(lastQm.index + lastQm[0].length);
+    } else {
+      // Sin unidad reconocible: cortar en el primer monto
+      const fp = rest.search(/\b\d{1,3}(?:\.\d{3})*,\d{2}\b/);
+      desc     = fp > 0 ? rest.slice(0, fp) : rest;
+      priceSec = fp > 0 ? rest.slice(fp) : '';
+    }
+
+    // 2) Montos SOLO en la sección de precios (después de cantidad+unidad).
+    //    Tolera miles malformados por pdf.js, ej. "1695.993,04".
+    const amounts = [];
+    const amtRe = /\d[\d.]*,\d{2}/g;
+    let am;
+    while ((am = amtRe.exec(priceSec)) !== null) amounts.push(parseArgNum(am[0]));
+
+    // Última columna = IMPORTE NETO (con descuentos aplicados)
     const netAmount = amounts.length ? amounts[amounts.length - 1] : 0;
     if (netAmount === 0) continue;   // skip lines without a price
 
-    // Quantity + unit: look in text BEFORE the first price
-    const firstPriceIdx = rest.search(/\b\d{1,3}(?:\.\d{3})*,\d{2}\b/);
-    const descPart = firstPriceIdx > 0 ? rest.substring(0, firstPriceIdx) : rest;
-
-    // Last "N  UNIT" pattern in that section
-    const qtyRe = /(\d+)\s+(BOL|CAJ|DP|KG|UN)\b/gi;
-    let qm, lastQm = null;
-    while ((qm = qtyRe.exec(descPart)) !== null) lastQm = qm;
-
-    const qty  = lastQm ? parseInt(lastQm[1]) : 1;
-    const unit = lastQm ? lastQm[2].toUpperCase() : 'CAJ';
-
-    // Description: everything before the qty+unit match (or before first price)
-    let desc = lastQm
-      ? descPart.substring(0, lastQm.index).trim()
-      : descPart.trim();
     desc = desc.replace(/\s+/g, ' ').trim();
 
     meta.items.push({
@@ -908,7 +946,7 @@ async function sendStock(invId) {
   for (const item of mapped) {
     try {
       await createStockMovement(jwt, item.ingId, item.quantity,
-        `Factura #${inv.number||'?'} - ${inv.supplier}`);
+        `Factura #${inv.number||'?'} - ${inv.supplier}`, loc.id);
       ok++;
     } catch(e) {
       errors.push(item.ingName + ': ' + e.message);
@@ -1149,10 +1187,9 @@ async function connectNucleo(locId) {
   const btn = event.target; btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
   try {
-    const r = await nucleoLogin(email, pass);
-    loc.jwt = r.jwt; loc.companyId = r.companyId; loc.companyName = r.companyName;
-    saveState();
-    showToast(`✅ Conectado: ${r.companyName}`, 'success');
+    saveState();                      // guardar credenciales antes de intentar
+    await nucleoAutoLogin(loc);       // guarda el JWT en el estado si funciona
+    showToast(`✅ Conectado: ${loc.name}`, 'success');
     renderSettings();
   } catch(e) {
     showToast('❌ ' + e.message, 'danger');
