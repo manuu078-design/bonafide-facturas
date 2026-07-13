@@ -682,6 +682,50 @@ function parseArgNum(s) {
   return parseFloat(s) || 0;
 }
 
+// ── Cálculo automático de cantidad de stock por bulto ──────────────────────
+// Interpreta el contenido del bulto desde la descripción de la factura según
+// la unidad del ingrediente en Nucleo. Ejemplos:
+//   "CAFE 1 X 10K." + Gramos  → 10000      "10X10X5 GR" + Unidad → 100
+//   "8 X 24 X 16 GRS" + Gramos → 3072      "800 SOB.X 6,25 GR." + Gramos → 5000
+//   "1X100 U" + Unidad → 100               "X 400 S" + Unidad → 400
+function suggestPerBulto(desc, ingUnit) {
+  if (!desc) return null;
+  const d = (' ' + desc.toUpperCase() + ' ').replace(/,/g, '.').replace(/(\d)O\b/g, '$10');
+  const u = (ingUnit || '').toUpperCase();
+
+  // Cadena multiplicativa que termina en unidad de peso: "1 X 10K", "10X10X5 GR"
+  const wm = d.match(/(\d+(?:\.\d+)?(?:\s*X\s*\d+(?:\.\d+)?)*)\s*(KGS?|KG|K|GRS|GR|G)\.?(?![A-Z])/);
+  let grams = null, nums = null;
+  if (wm) {
+    nums = wm[1].split(/\s*X\s*/).map(parseFloat);
+    const prod = nums.reduce((a, b) => a * b, 1);
+    grams = /^K/.test(wm[2]) ? prod * 1000 : prod;
+    const sob = d.match(/(\d+)\s*SOB/);   // "800 SOB.X 6,25 GR" → ×800
+    if (sob && !wm[1].split(/\s*X\s*/).includes(sob[1])) grams *= parseFloat(sob[1]);
+  }
+
+  if (/^KG|KILO/.test(u)) return grams != null ? grams / 1000 : null;
+  if (/UNID|^UN\b|^UN$/.test(u)) {
+    let m2 = d.match(/1\s*X\s*(\d+)\s*(?:UN?I?)\b/);  if (m2) return parseFloat(m2[1]);
+    m2 = d.match(/X\s*(\d+)\s*S\b/);                   if (m2) return parseFloat(m2[1]);
+    m2 = d.match(/(\d+)\s*SOB/);                        if (m2) return parseFloat(m2[1]);
+    if (nums && nums.length >= 2) return nums.slice(0, -1).reduce((a, b) => a * b, 1);
+    return null;
+  }
+  return grams;  // por defecto: gramos
+}
+
+// Cantidad de stock para un ítem: 1) valor guardado, 2) factor memorizado,
+// 3) sugerencia automática desde la descripción + unidad del ingrediente.
+function calcStockQty(it) {
+  if (it.stockQty > 0) return it.stockQty;
+  const m = (state.productMappings || {})[it.code];
+  if (!m || !(it.quantity > 0)) return '';
+  if (m.factor) return +((m.factor * it.quantity).toFixed(3));
+  const per = suggestPerBulto(it.description, m.ingUnit);
+  return per ? +((per * it.quantity).toFixed(3)) : '';
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // UPLOAD FLOW
 // ═══════════════════════════════════════════════════════════════════════
@@ -799,8 +843,8 @@ function renderItemsTable(items) {
       <td><input type="number" class="form-control form-control-sm item-qty" value="${it.quantity||''}" step="any"></td>
       <td><input type="text" class="form-control form-control-sm item-unit" value="${esc(it.unit||'CAJ')}" style="width:60px"></td>
       <td><input type="number" class="form-control form-control-sm item-stock-qty" step="any"
-                 value="${it.stockQty ?? (((state.productMappings||{})[it.code]?.factor && it.quantity) ? +( (state.productMappings[it.code].factor * it.quantity).toFixed(3) ) : '')}"
-                 placeholder="p/ stock" title="Cantidad que suma al stock en Nucleo (en la unidad del ingrediente, ej. gramos)"></td>
+                 value="${calcStockQty(it)}"
+                 placeholder="p/ stock" title="Cantidad que suma al stock en Nucleo (en la unidad del ingrediente, ej. gramos). Se calcula sola desde la descripción; revisala y corregila si hace falta."></td>
       <td>
         <input type="hidden" class="item-ing-id" value="${it.ingId||''}">
         <input type="text" class="form-control form-control-sm item-ing-name" value="${esc(it.ingName||'')}"
@@ -1061,12 +1105,13 @@ function renderIngList(ings, q) {
   list.innerHTML = filtered.slice(0,80).map(i => {
     const id = i.Id || i.id;
     const name = i.Name || i.name;
-    return `<button class="btn btn-outline-secondary btn-sm w-100 ing-btn" onclick="selectIng(${id},'${name.replace(/'/g,"\\'")}')">
-              ${esc(name)}</button>`;
+    const unit = i.MeasurementUnitName || '';
+    return `<button class="btn btn-outline-secondary btn-sm w-100 ing-btn" onclick="selectIng(${id},'${name.replace(/'/g,"\\'")}','${unit.replace(/'/g,"\\'")}')">
+              ${esc(name)}${unit ? ` <span class="text-muted small">(${esc(unit)})</span>` : ''}</button>`;
   }).join('');
 }
 
-function selectIng(id, name) {
+function selectIng(id, name, unit) {
   if (!activeIngRowEl) return;
   activeIngRowEl.querySelector('.item-ing-id').value = id;
   activeIngRowEl.querySelector('.item-ing-name').value = name;
@@ -1077,9 +1122,18 @@ function selectIng(id, name) {
     const prev = state.productMappings[code];
     const isNew = !prev;
     // Conservar el factor de conversión si se re-selecciona el mismo ingrediente
-    state.productMappings[code] = { ingId: id, ingName: name,
+    state.productMappings[code] = { ingId: id, ingName: name, ingUnit: unit || prev?.ingUnit || '',
       factor: (prev && prev.ingId === id) ? prev.factor : undefined };
     saveState();
+    // Autocompletar "Cant. stock" si está vacía: factor memorizado o sugerencia automática
+    const qtyEl = activeIngRowEl.querySelector('.item-qty');
+    const stockEl = activeIngRowEl.querySelector('.item-stock-qty');
+    const qty = parseFloat(qtyEl?.value) || 0;
+    if (stockEl && !(parseFloat(stockEl.value) > 0) && qty > 0) {
+      const m = state.productMappings[code];
+      const per = m.factor || suggestPerBulto(activeIngRowEl.querySelector('.item-desc')?.value, m.ingUnit);
+      if (per) stockEl.value = +((per * qty).toFixed(3));
+    }
     showToast(isNew ? `📌 Mapeo guardado: ${code} → ${name}` : `📌 Mapeo actualizado: ${code} → ${name}`, 'success');
   }
   bootstrap.Modal.getInstance(document.getElementById('ingModal')).hide();
