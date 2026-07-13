@@ -372,20 +372,50 @@ async function nucleoReq(method, path, body, jwt) {
   return { status: r.status, data };
 }
 
-// ── Auto-login con el flujo real de NucleoCheck ─────────────────────────────
-// El campo correcto es EmailUser (no email/userName), Password (mayúscula), IsUserCheck:true
+// ── Auto-login con el flujo real de NucleoCheck (2 pasos) ───────────────────
+// Paso 1: Account/ValidateUserAndGetCompanies (CompanyId:0) → devuelve las
+//         empresas del usuario. El CompanyId correcto es Companies[0].Id
+//         (NO un valor fijo — varía por local, ej. Obligado = 994).
+// Paso 2: Account/LoginUser con ese CompanyId → devuelve el Token JWT.
+// Campos correctos: EmailUser, Password (mayúscula), IsUserCheck:true.
 async function nucleoAutoLogin(loc) {
-  const companyId = loc.companyId || 1948;
+  const found = state.locations.find(l => l.id === loc.id) || loc;
+
+  // Determinar el CompanyId: usar el cacheado o descubrirlo
+  let companyId = loc.companyId;
+  if (!companyId) {
+    const v = await nucleoReq('POST', 'Account/ValidateUserAndGetCompanies', {
+      EmailUser : loc.email,
+      Password  : loc.password,
+      CompanyId : 0,
+      IsUserCheck: true
+    });
+    if (v.status !== 200 || v.data?.ValidationResult?.HasErrors) {
+      const e = v.data?.ValidationResult?.ErrorMessages?.join(', ') || v.status;
+      throw new Error('Auto-login fallido: ' + e + '. Verificá email/contraseña en Ajustes.');
+    }
+    const companies = v.data?.Companies || [];
+    if (companies.length === 0 && !v.data?.IsAdminUser) {
+      throw new Error('El usuario no tiene empresas asociadas.');
+    }
+    if (companies.length > 0) {
+      companyId = companies[0].Id;
+      found.companyId = companyId;
+      found.companyName = companies[0].Name || found.companyName;
+      saveState();
+    }
+  }
+
+  // Paso 2: login con el CompanyId real
   const r = await nucleoReq('POST', 'Account/LoginUser', {
     EmailUser : loc.email,
     Password  : loc.password,
-    CompanyId : companyId,
+    CompanyId : companyId || 0,
     IsUserCheck: true
   });
   if (r.status === 200 && r.data?.Token) {
-    // Guardar el nuevo JWT en el estado
-    const found = state.locations.find(l => l.id === loc.id);
-    if (found) { found.jwt = r.data.Token; saveState(); }
+    found.jwt = r.data.Token;
+    saveState();
     return r.data.Token;
   }
   const errs = r.data?.ValidationResult?.ErrorMessages?.join(', ') || r.status;
