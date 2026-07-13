@@ -192,6 +192,15 @@
     </div>
 
     <div class="col-lg-4">
+      <!-- Purchase order card (flujo principal) -->
+      <div class="card mb-3">
+        <div class="card-header text-white py-3" style="background:#1a1a2e">
+          <h6 class="mb-0"><i class="bi bi-truck me-2"></i>Crear Orden de Compra en Nucleo</h6>
+        </div>
+        <div class="card-body" id="purchase-panel">
+          <div class="text-muted small">Cargando...</div>
+        </div>
+      </div>
       <!-- Expense card -->
       <div class="card mb-3">
         <div class="card-header bg-primary text-white py-3">
@@ -833,6 +842,7 @@ async function renderReview(invId) {
   backfillStockSuggestions(inv);
 
   // Side panels
+  renderPurchasePanel(inv);
   await renderExpensePanel(inv);
   renderStockPanel(inv);
 }
@@ -1006,6 +1016,11 @@ function renderStockPanel(inv) {
     return;
   }
   panel.innerHTML = `
+    <div class="alert alert-warning py-2 px-2 small mb-2">
+      <i class="bi bi-exclamation-triangle me-1"></i>
+      Si creaste la <strong>Orden de Compra</strong>, NO uses este botón: el stock lo carga
+      Nucleo solo al procesar la orden (evitá duplicar).
+    </div>
     <p class="small text-muted">${mapped.length} de ${inv.items.length} artículos mapeados:</p>
     <ul class="list-unstyled small mb-3">
       ${mapped.map(it => `<li class="d-flex justify-content-between">
@@ -1013,12 +1028,149 @@ function renderStockPanel(inv) {
         <span class="badge bg-light text-dark">×${it.quantity}</span>
       </li>`).join('')}
     </ul>
-    <button class="btn btn-success w-100" onclick="sendStock(${inv.id})"
+    <button class="btn btn-outline-success w-100" onclick="sendStock(${inv.id})"
             ${inv.status==='done'?'disabled':''}>
       ${inv.status==='done'
         ? '<i class="bi bi-check-circle me-1"></i>Stock cargado'
-        : '<i class="bi bi-arrow-up-circle me-1"></i>Actualizar stock'}
+        : '<i class="bi bi-arrow-up-circle me-1"></i>Actualizar stock (manual)'}
     </button>`;
+}
+
+// ── Purchase order panel (flujo principal: Compras de Nucleo) ─────────────
+function renderPurchasePanel(inv) {
+  const panel = document.getElementById('purchase-panel');
+  if (!panel) return;
+  const mapped = (inv.items || []).filter(it => it.ingId);
+  const sinMapear = (inv.items || []).length - mapped.length;
+
+  if (inv.purchaseNucleoId) {
+    panel.innerHTML = `<div class="alert alert-success small mb-0 py-2">
+      <i class="bi bi-check-circle me-1"></i>
+      Orden de compra <strong>Nº ${esc(String(inv.purchaseNumber||inv.purchaseNucleoId))}</strong> creada.
+      Entrá a <strong>Nucleo → Compras</strong>, revisala y <strong>procesala</strong> para que
+      impacte el stock y la cuenta del proveedor.
+    </div>`;
+    return;
+  }
+  if (!mapped.length) {
+    panel.innerHTML = `<div class="text-muted small"><i class="bi bi-info-circle me-1"></i>
+      Mapeá los artículos a ingredientes de Nucleo para poder crear la orden.</div>`;
+    return;
+  }
+  panel.innerHTML = `
+    <p class="small text-muted mb-2">
+      Crea en Nucleo la orden de compra al proveedor <strong>${esc(inv.supplier||'?')}</strong> con
+      los ${mapped.length} artículos mapeados (cantidades y precios de la factura).
+      Después la procesás en Nucleo y el stock se carga solo — sin tocar la caja.
+    </p>
+    ${sinMapear>0?`<p class="small text-warning mb-2"><i class="bi bi-exclamation-triangle me-1"></i>${sinMapear} artículos sin mapear no se incluirán.</p>`:''}
+    <button class="btn w-100 text-white" style="background:#1a1a2e" onclick="createPurchaseOrder(${inv.id})">
+      <i class="bi bi-truck me-1"></i>Crear orden de compra
+    </button>`;
+}
+
+let cachedSuppliers = {};  // locId → [{Id,Name}]
+async function getSuppliers(jwt, locId) {
+  if (cachedSuppliers[locId]) return cachedSuppliers[locId];
+  const r = await nucleoReq('GET','IngredientStockFlow/GetIngredientStockFlowFilteringOptions',null,jwt);
+  const list = (r.status === 200 && r.data && r.data.Suppliers) || [];
+  if (list.length) cachedSuppliers[locId] = list;
+  return list;
+}
+
+async function createPurchaseOrder(invId) {
+  const inv = state.invoices.find(i => i.id === invId);
+  const loc = state.locations.find(l => l.id === inv.locId);
+  if (!loc) { showToast('Local no encontrado.', 'danger'); return; }
+
+  inv.items = getItemsFromTable();
+  const mapped = inv.items.filter(it => it.ingId && it.quantity > 0);
+  if (!mapped.length) { showToast('No hay artículos mapeados.', 'warning'); return; }
+
+  // Necesitamos la cantidad de stock para convertir a unidad de compra
+  const sinStockQty = mapped.filter(it => !(it.stockQty > 0));
+  if (sinStockQty.length) {
+    showToast('⚠️ Completá la columna "Cant. stock" para: '
+      + sinStockQty.map(i=>i.description.slice(0,25)).join(', '), 'warning');
+    return;
+  }
+
+  const btn = event.target; btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Creando orden...';
+  try {
+    const jwt = await getValidJwt(loc);
+
+    // Proveedor: buscar por nombre
+    const sups = await getSuppliers(jwt, loc.id);
+    const supName = (inv.supplier||'').toLowerCase();
+    const sup = sups.find(s => (s.Name||'').toLowerCase() === supName)
+             || sups.find(s => (s.Name||'').toLowerCase().includes(supName) || supName.includes((s.Name||'').toLowerCase()));
+    if (!sup) throw new Error('No encontré el proveedor "' + inv.supplier + '" en Nucleo. Crealo en Compras → Proveedores o corregí el nombre.');
+
+    // Ingredientes (para la relación unidad de compra ↔ unidad de stock)
+    const ings = await getIngredients(jwt, loc.id);
+    const byId = {}; ings.forEach(i => { byId[i.Id || i.id] = i; });
+
+    // Ítems: cantidad en UNIDAD DE COMPRA (ej. Kg) = stockQty / UnitRelationship
+    const items = mapped.map(it => {
+      const ing = byId[it.ingId] || {};
+      const rel = ing.UnitRelationship > 0 ? ing.UnitRelationship : 1;
+      const qty = +((it.stockQty / rel).toFixed(3));
+      const lineNet = +((it.unitPrice || 0) * it.quantity).toFixed(2);
+      return {
+        PurchaseItemId: 0, IngredientId: it.ingId, SizeId: null,
+        Quantity: qty,
+        UnitCostNoTax: qty > 0 ? +(lineNet / qty).toFixed(2) : 0,
+        UnitCost: 0,           // se completa abajo con el IVA prorrateado
+        DiscountPercentage: 0,
+        Total: lineNet
+      };
+    });
+
+    const subtotal = +(items.reduce((a,i)=>a+i.Total,0).toFixed(2));
+    const total    = inv.total > 0 ? inv.total : subtotal;
+    const tax      = +(Math.max(0, total - subtotal).toFixed(2));
+    const ivaRate  = subtotal > 0 ? tax / subtotal : 0;
+    items.forEach(i => { i.UnitCost = +(i.UnitCostNoTax * (1 + ivaRate)).toFixed(2); });
+
+    // Próximo número de orden (secuencial)
+    let pn = '';
+    try {
+      const pl = await nucleoReq('GET','PurchaseList/Find/?DateFrom=2020-01-01T00:00:00&DateTo=2035-12-31T23:59:59',null,jwt);
+      const nums = (pl.data||[]).map(p=>parseInt(p.PurchaseNumber)).filter(n=>!isNaN(n));
+      pn = String((nums.length ? Math.max(...nums) : 0) + 1);
+    } catch(e) {}
+
+    const now = new Date();
+    const body = {
+      Id: 0, Date: now.toISOString(), Hour: now.getHours(), Minute: now.getMinutes(),
+      Subtotal: subtotal, DiscountPercentage: 0, Discount: 0,
+      Subtotal2: subtotal, Tax: tax, Subtotal3: subtotal,
+      PercepcionGanancia: 0, PercepcionIVA: 0, PercepcionIIBB: 0,
+      ImpuestoInterno: 0, PercepcionMunicipal: 0,
+      Total: total,
+      SupplierId: sup.Id, IsFinalized: false,
+      PurchaseNumber: pn, InvoiceNumber: inv.number || null,
+      State: 1, Items: items
+    };
+
+    const r = await nucleoReq('POST','Purchase/Save',body,jwt);
+    const vr = r.data && r.data.ValidationResult;
+    if (r.status !== 200 || (vr && vr.HasErrors)) {
+      throw new Error((vr && vr.ErrorMessages && vr.ErrorMessages.join(', ')) || ('HTTP ' + r.status));
+    }
+
+    inv.purchaseNucleoId = pn || 'creada';
+    inv.purchaseNumber = pn;
+    inv.status = 'done';
+    saveState();
+    showToast(`✅ Orden de compra Nº ${pn||''} creada en Nucleo (${items.length} ítems, $${total.toLocaleString('es-AR')}). Procesala en Compras para impactar stock.`, 'success');
+    await renderReview(invId);
+  } catch(e) {
+    showToast('❌ ' + e.message, 'danger');
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-truck me-1"></i>Crear orden de compra';
+  }
 }
 
 // ── Send expense ─────────────────────────────────────────────────────────
