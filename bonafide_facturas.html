@@ -467,15 +467,15 @@ async function createExpense(jwt, typeId, desc, total, cashDrawerId) {
 
 async function getIngredients(jwt, locId) {
   if (cachedIngredients[locId]) return cachedIngredients[locId];
-  for (const path of ['Ingredient/GetValueOptionsForChoiceControls','Ingredient/GetAll','Ingredient/GetFilteredList']) {
-    const r = await nucleoReq('GET', path, null, jwt);
-    if (r.status === 200) {
-      let list = r.data;
-      if (!Array.isArray(list)) {
-        list = list.Ingredients || list.Items || list.Data || [];
-      }
-      if (list.length > 0) { cachedIngredients[locId] = list; return list; }
+  // Endpoint real de NucleoCheck: devuelve todos los ingredientes del local
+  // [{Id, Code, Name, CategoryName, MeasurementUnitName, ...}]
+  const r = await nucleoReq('GET', 'IngredientList/Find/', null, jwt);
+  if (r.status === 200) {
+    let list = r.data;
+    if (!Array.isArray(list)) {
+      list = list.Ingredients || list.Items || list.Data || [];
     }
+    if (list.length > 0) { cachedIngredients[locId] = list; return list; }
   }
   return [];
 }
