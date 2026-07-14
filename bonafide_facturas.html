@@ -1059,11 +1059,12 @@ function renderPurchasePanel(inv) {
   }
   panel.innerHTML = `
     <p class="small text-muted mb-2">
-      Crea en Nucleo la orden de compra al proveedor <strong>${esc(inv.supplier||'?')}</strong> con
-      los ${mapped.length} artículos mapeados (cantidades y precios de la factura).
-      Después la procesás en Nucleo y el stock se carga solo — sin tocar la caja.
+      Crea en Nucleo la orden de compra al proveedor <strong>${esc(inv.supplier||'?')}</strong>:
+      el <strong>total va completo</strong> ($${(inv.total||0).toLocaleString('es-AR')}, todos los renglones
+      de la factura) para tu análisis mensual de gastos, y los <strong>${mapped.length} artículos mapeados</strong>
+      van como ítems para que Nucleo cargue su stock al procesarla. Sin tocar la caja.
     </p>
-    ${sinMapear>0?`<p class="small text-warning mb-2"><i class="bi bi-exclamation-triangle me-1"></i>${sinMapear} artículos sin mapear no se incluirán.</p>`:''}
+    ${sinMapear>0?`<p class="small text-muted mb-2"><i class="bi bi-info-circle me-1"></i>${sinMapear} artículos sin mapear: entran en el total pero no llevan stock.</p>`:''}
     <button class="btn w-100 text-white" style="background:#1a1a2e" onclick="createPurchaseOrder(${inv.id})">
       <i class="bi bi-truck me-1"></i>Crear orden de compra
     </button>`;
@@ -1127,7 +1128,11 @@ async function createPurchaseOrder(invId) {
       };
     });
 
-    const subtotal = +(items.reduce((a,i)=>a+i.Total,0).toFixed(2));
+    // El dinero va COMPLETO (todos los renglones de la factura, mapeados o no):
+    // así el análisis mensual de Compras refleja el gasto total real.
+    // Los ítems de la orden (stock) son solo los mapeados.
+    const subtotalAll = +(inv.items.reduce((a,it)=>a+((it.unitPrice||0)*(it.quantity||0)),0).toFixed(2));
+    const subtotal = subtotalAll > 0 ? subtotalAll : +(items.reduce((a,i)=>a+i.Total,0).toFixed(2));
     const total    = inv.total > 0 ? inv.total : subtotal;
     const tax      = +(Math.max(0, total - subtotal).toFixed(2));
     const ivaRate  = subtotal > 0 ? tax / subtotal : 0;
