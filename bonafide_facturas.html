@@ -201,24 +201,6 @@
           <div class="text-muted small">Cargando...</div>
         </div>
       </div>
-      <!-- Expense card -->
-      <div class="card mb-3">
-        <div class="card-header bg-primary text-white py-3">
-          <h6 class="mb-0"><i class="bi bi-cash-coin me-2"></i>Cargar Gasto en Nucleo</h6>
-        </div>
-        <div class="card-body" id="expense-panel">
-          <div class="text-muted small">Cargando opciones Nucleo...</div>
-        </div>
-      </div>
-      <!-- Stock card -->
-      <div class="card mb-3">
-        <div class="card-header bg-success text-white py-3">
-          <h6 class="mb-0"><i class="bi bi-boxes me-2"></i>Cargar Stock en Nucleo</h6>
-        </div>
-        <div class="card-body" id="stock-panel">
-          <div class="text-muted small">Guardá los cambios primero para ver los ítems mapeados.</div>
-        </div>
-      </div>
       <!-- Raw text -->
       <div class="card">
         <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
@@ -717,6 +699,14 @@ function suggestPerBulto(desc, ingUnit) {
     grams = /^K/.test(wm[2]) ? prod * 1000 : prod;
     const sob = d.match(/(\d+)\s*SOB/);   // "800 SOB.X 6,25 GR" → ×800
     if (sob && !wm[1].split(/\s*X\s*/).includes(sob[1])) grams *= parseFloat(sob[1]);
+  } else {
+    // Cadena multiplicativa SIN unidad al final: "8X20X35", "15X68"
+    // (el último número se interpreta como gramos por unidad)
+    const all = [...d.matchAll(/(\d+(?:\.\d+)?(?:\s*X\s*\d+(?:\.\d+)?)+)(?![A-Za-z0-9.])/g)];
+    if (all.length) {
+      nums = all[all.length-1][1].split(/\s*X\s*/).map(parseFloat);
+      if (nums.length >= 2) grams = nums.reduce((a, b) => a * b, 1);
+    }
   }
 
   if (/^KG|KILO/.test(u)) return grams != null ? grams / 1000 : null;
@@ -849,10 +839,8 @@ async function renderReview(invId) {
   // Completar unidades de ingredientes y recalcular sugerencias (en segundo plano)
   backfillStockSuggestions(inv);
 
-  // Side panels
+  // Side panel
   renderPurchasePanel(inv);
-  await renderExpensePanel(inv);
-  renderStockPanel(inv);
 }
 
 // Busca en Nucleo la unidad real de cada ingrediente mapeado (gramos/unidades/kg),
@@ -968,7 +956,7 @@ function saveCurrentInvoice() {
   inv.locId    = parseInt(document.getElementById('r-location').value);
   inv.items    = getItemsFromTable();
   saveState();
-  renderStockPanel(inv);
+  renderPurchasePanel(inv);
   showToast('Cambios guardados.', 'success');
 }
 
@@ -1178,6 +1166,14 @@ async function createPurchaseOrder(invId) {
     const vr = r.data && r.data.ValidationResult;
     if (r.status !== 200 || (vr && vr.HasErrors)) {
       throw new Error((vr && vr.ErrorMessages && vr.ErrorMessages.join(', ')) || ('HTTP ' + r.status));
+    }
+
+    // Memorizar el factor de conversión bulto→stock de cada producto:
+    // la próxima factura con estos códigos calcula la cantidad sola.
+    for (const item of mapped) {
+      if (item.code && item.quantity > 0 && item.stockQty > 0 && state.productMappings?.[item.code]) {
+        state.productMappings[item.code].factor = +((item.stockQty / item.quantity).toFixed(6));
+      }
     }
 
     inv.purchaseNucleoId = pn || 'creada';
