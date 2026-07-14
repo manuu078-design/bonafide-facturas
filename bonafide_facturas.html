@@ -1609,14 +1609,29 @@ function renderDashboard() {
           <td class="text-center"><span class="status-badge status-${inv.status}">
             ${{pending:'Pendiente',expense_sent:'Gasto ✓',done:'Completa'}[inv.status]||inv.status}
           </span></td>
-          <td class="pe-3 text-end">
+          <td class="pe-3 text-end text-nowrap">
             <button class="btn btn-sm btn-outline-secondary" onclick="showPage('review',${inv.id})">
               <i class="bi bi-eye"></i> Revisar
+            </button>
+            <button class="btn btn-sm btn-outline-danger ms-1" title="Eliminar factura"
+                    onclick="deleteInvoice(${inv.id})">
+              <i class="bi bi-trash3"></i>
             </button>
           </td>
         </tr>`).join('')}
       </tbody>
     </table></div></div>`;
+}
+
+function deleteInvoice(invId) {
+  const inv = state.invoices.find(i => i.id === invId);
+  if (!inv) return;
+  if (!confirm(`¿Eliminar la factura ${inv.number||'(sin número)'} de ${inv.supplier||'?'}?\n` +
+    `Solo se borra de esta app — lo ya cargado en Nucleo (orden de compra, stock, gastos) no se toca.`)) return;
+  state.invoices = state.invoices.filter(i => i.id !== invId);
+  saveState();
+  renderDashboard();
+  showToast('🗑️ Factura eliminada.', 'info');
 }
 
 // ═══════════════════════════════════════════════════════════════════════
