@@ -563,7 +563,13 @@ async function extractPDF(file) {
 }
 
 function parseInvoiceText(text) {
-  const meta = { supplier:'Bonafide', number:'', date:'', total:0, items:[] };
+  const meta = { supplier:'Bonafide', number:'', date:'', total:0, subtotal:0, iva:0, items:[] };
+
+  // Subtotal (sin IVA) e IVA detallados en la factura
+  let sm = text.match(/SUB\s*TOTAL\s*\$?\s*([\d.]+,\d{2})/i);
+  if (sm) meta.subtotal = parseArgNum(sm[1]);
+  sm = text.match(/IVA\s+\d+(?:[.,]\d+)?\s*%\s*\$?\s*([\d.]+,\d{2})/i);
+  if (sm) meta.iva = parseArgNum(sm[1]);
 
   // Supplier
   if (/BONAFIDE/i.test(text)) meta.supplier = 'Bonafide';
@@ -789,7 +795,9 @@ async function processUpload() {
     const inv = {
       id: state.nextId++,
       locId, supplier: meta.supplier, number: meta.number,
-      date: meta.date, total: meta.total, status: 'pending',
+      date: meta.date, total: meta.total,
+      subtotal: meta.subtotal || 0, iva: meta.iva || 0,
+      status: 'pending',
       expenseNucleoId: null, rawText,
       items: meta.items.map((it,i) => {
         const m = (state.productMappings||{})[it.code];
@@ -895,6 +903,7 @@ function renderItemsTable(items) {
                  value="${calcStockQty(it)}" data-auto="${it.stockQty > 0 ? '0' : '1'}" oninput="this.dataset.auto='0'"
                  placeholder="p/ stock" title="Cantidad que suma al stock en Nucleo (en la unidad del ingrediente, ej. gramos o unidades). Se calcula sola desde la descripción; revisala y corregila si hace falta."></td>
       <td>
+        <input type="hidden" class="item-price" value="${it.unitPrice||0}">
         <input type="hidden" class="item-ing-id" value="${it.ingId||''}">
         <input type="text" class="form-control form-control-sm item-ing-name" value="${esc(it.ingName||'')}"
                placeholder="Buscar ingrediente..." readonly style="background:#fff;cursor:pointer"
@@ -917,6 +926,7 @@ function addItemRow() {
     <td><input type="text" class="form-control form-control-sm item-unit" value="CAJ" style="width:60px"></td>
     <td><input type="number" class="form-control form-control-sm item-stock-qty" value="" step="any" placeholder="p/ stock"></td>
     <td>
+      <input type="hidden" class="item-price" value="0">
       <input type="hidden" class="item-ing-id" value="">
       <input type="text" class="form-control form-control-sm item-ing-name" value=""
              placeholder="Buscar ingrediente..." readonly style="background:#fff;cursor:pointer"
@@ -940,6 +950,7 @@ function getItemsFromTable() {
       quantity: parseFloat(row.querySelector('.item-qty').value) || 0,
       unit: row.querySelector('.item-unit').value.trim() || 'CAJ',
       stockQty: parseFloat(row.querySelector('.item-stock-qty')?.value) || 0,
+      unitPrice: parseFloat(row.querySelector('.item-price')?.value) || 0,
       ingId: row.querySelector('.item-ing-id').value ? parseInt(row.querySelector('.item-ing-id').value) : null,
       ingName: row.querySelector('.item-ing-name').value.trim(),
     });
@@ -1131,10 +1142,14 @@ async function createPurchaseOrder(invId) {
     // El dinero va COMPLETO (todos los renglones de la factura, mapeados o no):
     // así el análisis mensual de Compras refleja el gasto total real.
     // Los ítems de la orden (stock) son solo los mapeados.
+    // Prioridad: subtotal e IVA detallados en la propia factura → si no, se calculan.
     const subtotalAll = +(inv.items.reduce((a,it)=>a+((it.unitPrice||0)*(it.quantity||0)),0).toFixed(2));
-    const subtotal = subtotalAll > 0 ? subtotalAll : +(items.reduce((a,i)=>a+i.Total,0).toFixed(2));
+    const subtotal = inv.subtotal > 0 ? inv.subtotal
+                   : (subtotalAll > 0 ? subtotalAll : +(items.reduce((a,i)=>a+i.Total,0).toFixed(2)));
     const total    = inv.total > 0 ? inv.total : subtotal;
-    const tax      = +(Math.max(0, total - subtotal).toFixed(2));
+    const tax      = inv.iva > 0 ? inv.iva : +(Math.max(0, total - subtotal).toFixed(2));
+    // Diferencia restante (percepciones u otros impuestos de la factura)
+    const percep   = +(Math.max(0, total - subtotal - tax).toFixed(2));
     const ivaRate  = subtotal > 0 ? tax / subtotal : 0;
     items.forEach(i => { i.UnitCost = +(i.UnitCostNoTax * (1 + ivaRate)).toFixed(2); });
 
@@ -1151,7 +1166,7 @@ async function createPurchaseOrder(invId) {
       Id: 0, Date: now.toISOString(), Hour: now.getHours(), Minute: now.getMinutes(),
       Subtotal: subtotal, DiscountPercentage: 0, Discount: 0,
       Subtotal2: subtotal, Tax: tax, Subtotal3: subtotal,
-      PercepcionGanancia: 0, PercepcionIVA: 0, PercepcionIIBB: 0,
+      PercepcionGanancia: 0, PercepcionIVA: percep, PercepcionIIBB: 0,
       ImpuestoInterno: 0, PercepcionMunicipal: 0,
       Total: total,
       SupplierId: sup.Id, IsFinalized: false,
