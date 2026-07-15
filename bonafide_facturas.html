@@ -1635,7 +1635,7 @@ function renderDashboard() {
     </span></td>
     <td class="text-center">${inv.paid
       ? `<button class="btn btn-sm btn-success" title="Pagada el ${inv.paidDate||'—'} — click para desmarcar" onclick="togglePaid(${inv.id})"><i class="bi bi-check-lg me-1"></i>PAGADO</button>`
-      : `<button class="btn btn-sm btn-outline-danger" title="Click para marcar como pagada" onclick="togglePaid(${inv.id})">SIN PAGAR</button>`}</td>
+      : `<button class="btn btn-sm btn-outline-success" title="Click para marcar como pagada" onclick="togglePaid(${inv.id})">PAGADO</button>`}</td>
     <td class="pe-3 text-end text-nowrap">
       <button class="btn btn-sm btn-outline-secondary" title="Revisar" onclick="showPage('review',${inv.id})">
         <i class="bi bi-eye"></i>
