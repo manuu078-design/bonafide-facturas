@@ -1762,6 +1762,27 @@ function companyOfInv(inv) {
 }
 const fmt$ = n => '$' + (n||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});
 
+// Días que lleva impaga una factura (desde su fecha hasta hoy)
+function parseARDate(s) {
+  const m = String(s||'').match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if (!m) return null;
+  let y = +m[3]; if (y < 100) y += 2000;
+  const d = new Date(y, +m[2]-1, +m[1]);
+  return isNaN(d.getTime()) ? null : d;
+}
+function daysUnpaid(inv) {
+  if (inv.paid) return null;
+  const d = parseARDate(inv.date);
+  if (!d) return null;
+  return Math.max(0, Math.floor((Date.now() - d.getTime()) / 86400000));
+}
+function daysBadge(inv) {
+  const du = daysUnpaid(inv);
+  if (du === null) return '<span class="text-muted">—</span>';
+  const cls = du >= 30 ? 'text-danger fw-bold' : du >= 15 ? 'text-warning fw-bold' : 'text-muted';
+  return `<span class="${cls}">${du} día${du!==1?'s':''}</span>`;
+}
+
 let dashOnlyUnpaid = false;
 function toggleDashFilter(el) { dashOnlyUnpaid = el.checked; renderDashboard(); }
 
@@ -1825,6 +1846,7 @@ function renderDashboard() {
     <td class="small text-muted">${esc(loc(inv.locId))}</td>
     <td class="font-monospace small">${esc(inv.number||'—')}</td>
     <td class="text-end fw-semibold">${inv.total?fmt$(inv.total):'—'}</td>
+    <td class="text-center small">${inv.paid ? '<span class="text-success">✓</span>' : daysBadge(inv)}</td>
     <td class="text-center"><span class="status-badge status-${inv.status}">
       ${{pending:'Pendiente',expense_sent:'Gasto ✓',done:'Completa'}[inv.status]||inv.status}
     </span></td>
@@ -1841,7 +1863,35 @@ function renderDashboard() {
     </td>
   </tr>`;
 
-  cont.innerHTML =
+  // ⚠️ Facturas con 30 o más días sin pagar
+  const overdue = invs.filter(i => (daysUnpaid(i) ?? -1) >= 30)
+                      .sort((a,b) => daysUnpaid(b) - daysUnpaid(a));
+  const overdueHtml = !overdue.length ? '' : `
+    <div class="card mb-4 border-danger">
+      <div class="card-header py-3" style="background:#fdecea">
+        <h6 class="mb-0 fw-bold text-danger"><i class="bi bi-exclamation-triangle-fill me-2"></i>
+          Impagas hace 30 días o más <span class="badge bg-danger ms-1">${overdue.length}</span>
+          <span class="float-end">${fmt$(overdue.reduce((s,i)=>s+(i.total||0),0))}</span></h6>
+      </div>
+      <div class="card-body p-0"><table class="table table-hover mb-0">
+        <tbody>
+          ${overdue.map(inv => `<tr>
+            <td class="ps-3"><span class="fw-bold text-danger">${daysUnpaid(inv)} días</span>
+              <span class="small text-muted ms-1">(${inv.date||'—'})</span></td>
+            <td class="small">${esc(companyOfInv(inv))}</td>
+            <td class="small text-muted">${esc(loc(inv.locId))}</td>
+            <td class="font-monospace small">${esc(inv.number||'—')}</td>
+            <td class="text-end fw-semibold">${inv.total?fmt$(inv.total):'—'}</td>
+            <td class="pe-3 text-end text-nowrap">
+              <button class="btn btn-sm btn-outline-success" onclick="togglePaid(${inv.id})">PAGADO</button>
+              <button class="btn btn-sm btn-outline-secondary ms-1" onclick="showPage('review',${inv.id})"><i class="bi bi-eye"></i></button>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div>
+    </div>`;
+
+  cont.innerHTML = overdueHtml +
     `<div class="form-check form-switch mb-3">
       <input class="form-check-input" type="checkbox" id="only-unpaid" ${dashOnlyUnpaid?'checked':''} onchange="toggleDashFilter(this)">
       <label class="form-check-label" for="only-unpaid">Mostrar solo facturas sin pagar</label>
@@ -1865,6 +1915,7 @@ function renderDashboard() {
             <tr>
               <th class="ps-3">Fecha</th><th>Proveedor</th><th>Local</th>
               <th>N° Factura</th><th class="text-end">Total</th>
+              <th class="text-center">Impaga hace</th>
               <th class="text-center">Estado</th><th class="text-center">Pago</th><th class="pe-3"></th>
             </tr>
           </thead>
