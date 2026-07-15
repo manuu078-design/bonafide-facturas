@@ -96,6 +96,13 @@ EMPLOYEE_HTML = """<!DOCTYPE html>
       <option value="">— Elegí el local —</option>
       __LOCS__
     </select>
+    <label>Proveedor <span style="font-weight:400;color:#999">(de quién es la factura)</span></label>
+    <input type="text" id="sup" list="sups" placeholder="ej. Bonafide, Edenor, Icedream...">
+    <datalist id="sups">
+      <option>Bonafide</option><option>Icedream</option><option>Lulú</option>
+      <option>Edenor</option><option>Huertas del Pilar</option><option>Lorenzo</option>
+      <option>Planta Bilbao</option><option>La Serenísima</option>
+    </datalist>
     <label>Fotos de la factura</label>
     <input type="file" id="file" accept="image/*,.pdf" multiple style="display:none">
     <div class="photo-btn" onclick="document.getElementById('file').click()">📷 Sacar foto / elegir archivo</div>
@@ -185,6 +192,7 @@ async function send() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({pin, loc, note: $('note').value.trim(),
+                            supplier: $('sup').value.trim(),
                             photos: files.map(f => ({name: f.name, type: f.type, data: f.data}))})
     });
     const j = await r.json();
@@ -192,7 +200,7 @@ async function send() {
     localStorage.setItem('bf_pin', pin);
     localStorage.setItem('bf_loc', loc);
     $('pin-card').style.display = 'none';
-    files = []; renderThumbs(); $('note').value = '';
+    files = []; renderThumbs(); $('note').value = ''; $('sup').value = '';
     msg.className = 'ok';
     msg.textContent = '✅ Factura enviada. ¡Gracias! Podés cargar otra.';
   } catch(e) {
@@ -298,6 +306,7 @@ class Handler(BaseHTTPRequestHandler):
         items.insert(0, {
             "id": item_id,
             "loc": loc,
+            "supplier": str(data.get("supplier") or "")[:60],
             "note": str(data.get("note") or "")[:300],
             "ts": time.strftime("%d/%m/%Y %H:%M"),
             "photos": saved,

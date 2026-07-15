@@ -546,18 +546,32 @@ async function extractPDF(file) {
   return fullText;
 }
 
+// Proveedores conocidos: [patrón en el texto, nombre normalizado]
+const KNOWN_SUPPLIERS = [
+  [/BONAFIDE/i, 'Bonafide'],
+  [/ICE\s*DREAM/i, 'Icedream'],
+  [/LULU/i, 'Lulú'],
+  [/EDENOR/i, 'Edenor'],
+  [/HUERTAS?\s+DEL?\s+PILAR/i, 'Huertas del Pilar'],
+  [/LORENZO/i, 'Lorenzo'],
+  [/BILBAO/i, 'Planta Bilbao'],
+  [/SERENISIMA|MASTELLONE/i, 'La Serenísima'],
+];
+
 function parseInvoiceText(text) {
-  const meta = { supplier:'Bonafide', number:'', date:'', total:0, subtotal:0, iva:0, items:[] };
+  const meta = { supplier:'', number:'', date:'', total:0, subtotal:0, iva:0, items:[] };
 
   // Subtotal (sin IVA) e IVA detallados en la factura
   let sm = text.match(/SUB\s*TOTAL\s*\$?\s*([\d.]+,\d{2})/i);
+  if (!sm) sm = text.match(/NETO\s+GRAVADO[:\s]*\$?\s*([\d.]+,\d{2})/i);
   if (sm) meta.subtotal = parseArgNum(sm[1]);
   sm = text.match(/IVA\s+\d+(?:[.,]\d+)?\s*%\s*\$?\s*([\d.]+,\d{2})/i);
   if (sm) meta.iva = parseArgNum(sm[1]);
 
-  // Supplier
-  if (/BONAFIDE/i.test(text)) meta.supplier = 'Bonafide';
-  else if (/SERENISIMA|MASTELLONE/i.test(text)) meta.supplier = 'La Serenísima';
+  // Supplier (si no lo reconoce queda vacío y se completa a mano)
+  for (const [re, name] of KNOWN_SUPPLIERS) {
+    if (re.test(text)) { meta.supplier = name; break; }
+  }
 
   // Invoice/Remito number
   let m = text.match(/(?:FACTURA|REMITO)\s+(\d{4}-\d{6,})/i);
@@ -781,7 +795,7 @@ async function processUpload() {
       meta = { ...parsed, supplier: supplier || parsed.supplier };
     } else {
       rawText = '(Imagen: datos extraídos manualmente)';
-      meta.supplier = supplier || 'Bonafide';
+      meta.supplier = supplier || '';
     }
 
     const inv = {
@@ -1056,19 +1070,21 @@ function renderPurchasePanel(inv) {
     </div>`;
     return;
   }
-  if (!mapped.length) {
+  const isBonafide = /bonafide/i.test(inv.supplier||'');
+  if (isBonafide && !mapped.length) {
     panel.innerHTML = `<div class="text-muted small"><i class="bi bi-info-circle me-1"></i>
       Mapeá los artículos a ingredientes de Nucleo para poder crear la orden.</div>`;
     return;
   }
   panel.innerHTML = `
     <p class="small text-muted mb-2">
-      Crea en Nucleo la orden de compra al proveedor <strong>${esc(inv.supplier||'?')}</strong>:
-      el <strong>total va completo</strong> ($${(inv.total||0).toLocaleString('es-AR')}, todos los renglones
-      de la factura) para tu análisis mensual de gastos, y los <strong>${mapped.length} artículos mapeados</strong>
-      van como ítems para que Nucleo cargue su stock al procesarla. Sin tocar la caja.
+      Crea en Nucleo la orden de compra al proveedor <strong>${esc(inv.supplier||'?')}</strong>
+      por <strong>$${(inv.total||0).toLocaleString('es-AR')}</strong> (total completo de la factura,
+      para tu análisis mensual de gastos). Sin tocar la caja.
+      ${mapped.length ? `Los <strong>${mapped.length} artículos mapeados</strong> van como ítems para que Nucleo cargue su stock al procesarla.` : ''}
     </p>
-    ${sinMapear>0?`<p class="small text-muted mb-2"><i class="bi bi-info-circle me-1"></i>${sinMapear} artículos sin mapear: entran en el total pero no llevan stock.</p>`:''}
+    ${!mapped.length ? `<p class="small text-muted mb-2"><i class="bi bi-info-circle me-1"></i>Sin ítems de stock: la orden registra solo el gasto.</p>`
+      : sinMapear>0 ? `<p class="small text-muted mb-2"><i class="bi bi-info-circle me-1"></i>${sinMapear} artículos sin mapear: entran en el total pero no llevan stock.</p>` : ''}
     <button class="btn w-100 text-white" style="background:#1a1a2e" onclick="createPurchaseOrder(${inv.id})">
       <i class="bi bi-truck me-1"></i>Crear orden de compra
     </button>`;
@@ -1089,8 +1105,10 @@ async function createPurchaseOrder(invId) {
   if (!loc) { showToast('Local no encontrado.', 'danger'); return; }
 
   inv.items = getItemsFromTable();
+  if (!(inv.supplier||'').trim()) { showToast('Completá el proveedor de la factura.', 'warning'); return; }
+  const isBonafide = /bonafide/i.test(inv.supplier||'');
   const mapped = inv.items.filter(it => it.ingId && it.quantity > 0);
-  if (!mapped.length) { showToast('No hay artículos mapeados.', 'warning'); return; }
+  if (isBonafide && !mapped.length) { showToast('No hay artículos mapeados.', 'warning'); return; }
 
   // Necesitamos la cantidad de stock para convertir a unidad de compra
   const sinStockQty = mapped.filter(it => !(it.stockQty > 0));
@@ -1137,8 +1155,13 @@ async function createPurchaseOrder(invId) {
     // Los ítems de la orden (stock) son solo los mapeados.
     // Prioridad: subtotal e IVA detallados en la propia factura → si no, se calculan.
     const subtotalAll = +(inv.items.reduce((a,it)=>a+((it.unitPrice||0)*(it.quantity||0)),0).toFixed(2));
-    const subtotal = inv.subtotal > 0 ? inv.subtotal
-                   : (subtotalAll > 0 ? subtotalAll : +(items.reduce((a,i)=>a+i.Total,0).toFixed(2)));
+    let subtotal = inv.subtotal > 0 ? inv.subtotal
+                 : (subtotalAll > 0 ? subtotalAll : +(items.reduce((a,i)=>a+i.Total,0).toFixed(2)));
+    // Sin renglones con precio (ej. factura de servicios): estimar el neto
+    if (!(subtotal > 0)) {
+      subtotal = inv.iva > 0 ? +(((inv.total||0) - inv.iva).toFixed(2))
+                             : +(((inv.total||0) / 1.21).toFixed(2));
+    }
     const total    = inv.total > 0 ? inv.total : subtotal;
     const tax      = inv.iva > 0 ? inv.iva : +(Math.max(0, total - subtotal).toFixed(2));
     // Diferencia restante (percepciones u otros impuestos de la factura)
@@ -1617,7 +1640,7 @@ function renderInbox() {
                 : `<a href="/api/photo/${p}?pin=${pin}" target="_blank"><img src="/api/photo/${p}?pin=${pin}" style="height:110px;border-radius:6px;border:1px solid #ddd"></a>`).join('')}
             </div>
             <div class="card-body pt-0 pb-2">
-              <div class="fw-semibold">${esc(it.loc)}</div>
+              <div class="fw-semibold">${esc(it.loc)}${it.supplier ? ` <span class="badge text-bg-light border">${esc(it.supplier)}</span>` : ''}</div>
               <div class="small text-muted">${esc(it.ts)}${it.note ? ' · '+esc(it.note) : ''}</div>
             </div>
             <div class="card-footer bg-white d-flex gap-2 py-2">
@@ -1697,7 +1720,7 @@ async function processInboxItem(itemId) {
     const inv = {
       id: state.nextId++,
       locId: matchLocByName(it.loc),
-      supplier: parsed.supplier, number: parsed.number,
+      supplier: it.supplier || parsed.supplier, number: parsed.number,
       date: parsed.date || it.ts.split(' ')[0], total: parsed.total,
       subtotal: parsed.subtotal || 0, iva: parsed.iva || 0,
       status: 'pending', expenseNucleoId: null,
