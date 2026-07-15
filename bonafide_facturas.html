@@ -70,6 +70,7 @@
     No tenés locales configurados. <a href="#" onclick="showPage('settings')" class="alert-link">Configurá uno primero →</a>
   </div>
   <div id="invoice-stats" class="row g-3 mb-4"></div>
+  <div id="inbox-container" class="mb-4"></div>
   <div id="invoice-list-container"></div>
 </div>
 
@@ -129,6 +130,7 @@
   </div>
   <div class="row g-4">
     <div class="col-lg-8">
+      <div id="review-photos" class="mb-4"></div>
       <!-- Header -->
       <div class="card mb-4">
         <div class="card-header bg-white py-3">
@@ -832,6 +834,9 @@ async function renderReview(invId) {
   sel.innerHTML = state.locations.map(l =>
     `<option value="${l.id}" ${l.id===inv.locId?'selected':''}>${l.name}</option>`
   ).join('');
+
+  // Foto original (si vino de la bandeja de locales)
+  renderReviewPhotos(inv);
 
   // Items table
   renderItemsTable(inv.items);
@@ -1555,6 +1560,195 @@ function deleteLocation(locId) {
 // ═══════════════════════════════════════════════════════════════════════
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// BANDEJA: facturas subidas por los empleados desde /cargar
+// ═══════════════════════════════════════════════════════════════════════
+let inboxCache = [];
+
+function getServerPin(force) {
+  if (state.serverPin && !force) return state.serverPin;
+  const p = prompt('PIN de la bandeja de facturas (el mismo que usan los empleados):');
+  if (p) { state.serverPin = p.trim(); saveState(); }
+  return state.serverPin;
+}
+
+async function loadInbox() {
+  const box = document.getElementById('inbox-container');
+  if (!box || !IS_PROXIED) return;
+  if (!state.serverPin) {
+    box.innerHTML = `<div class="card p-3 d-flex flex-row align-items-center justify-content-between">
+      <span class="text-muted"><i class="bi bi-inbox me-2"></i>Bandeja de facturas de los locales</span>
+      <button class="btn btn-sm btn-outline-primary" onclick="getServerPin(true) && loadInbox()">Conectar con PIN</button>
+    </div>`;
+    return;
+  }
+  try {
+    const r = await fetch('/api/inbox?pin=' + encodeURIComponent(state.serverPin));
+    if (r.status === 403) {
+      state.serverPin = null; saveState();
+      showToast('PIN de bandeja incorrecto.', 'warning');
+      return loadInbox();
+    }
+    inboxCache = await r.json();
+    renderInbox();
+  } catch(e) { box.innerHTML = ''; }
+}
+
+function renderInbox() {
+  const box = document.getElementById('inbox-container');
+  if (!box) return;
+  const items = inboxCache.filter(it => it.status === 'new');
+  if (!items.length) { box.innerHTML = ''; return; }
+  const pin = encodeURIComponent(state.serverPin);
+  box.innerHTML = `<div class="card border-primary">
+    <div class="card-header py-3 d-flex justify-content-between align-items-center" style="background:#eef2ff">
+      <h6 class="mb-0 fw-bold"><i class="bi bi-inbox-fill me-2 text-primary"></i>
+        Recibidas de los locales <span class="badge bg-primary ms-1">${items.length}</span></h6>
+      <button class="btn btn-sm btn-link p-0" onclick="loadInbox()"><i class="bi bi-arrow-clockwise"></i> Actualizar</button>
+    </div>
+    <div class="card-body">
+      <div class="row g-3">
+        ${items.map(it => `
+        <div class="col-12 col-md-6 col-lg-4">
+          <div class="card h-100">
+            <div class="d-flex gap-1 p-2" style="overflow-x:auto">
+              ${it.photos.map(p => p.endsWith('.pdf')
+                ? `<a href="/api/photo/${p}?pin=${pin}" target="_blank" class="d-flex align-items-center justify-content-center border rounded text-danger fw-bold" style="min-width:90px;height:110px;font-size:.8em">PDF</a>`
+                : `<a href="/api/photo/${p}?pin=${pin}" target="_blank"><img src="/api/photo/${p}?pin=${pin}" style="height:110px;border-radius:6px;border:1px solid #ddd"></a>`).join('')}
+            </div>
+            <div class="card-body pt-0 pb-2">
+              <div class="fw-semibold">${esc(it.loc)}</div>
+              <div class="small text-muted">${esc(it.ts)}${it.note ? ' · '+esc(it.note) : ''}</div>
+            </div>
+            <div class="card-footer bg-white d-flex gap-2 py-2">
+              <button class="btn btn-sm btn-primary flex-grow-1" id="proc-${it.id}" onclick="processInboxItem('${it.id}')">
+                <i class="bi bi-magic me-1"></i>Procesar</button>
+              <button class="btn btn-sm btn-outline-danger" onclick="deleteInboxItem('${it.id}')"><i class="bi bi-trash3"></i></button>
+            </div>
+          </div>
+        </div>`).join('')}
+      </div>
+    </div></div>`;
+}
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = src; s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  });
+}
+
+// OCR de fotos con Tesseract.js (español) — corre en el navegador
+async function ocrPhotos(urls, onProgress) {
+  if (!window.Tesseract) {
+    onProgress('Cargando lector OCR...');
+    await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
+  }
+  const worker = await Tesseract.createWorker('spa');
+  let text = '';
+  try {
+    for (let i = 0; i < urls.length; i++) {
+      onProgress(`Leyendo foto ${i+1}/${urls.length}...`);
+      const { data } = await worker.recognize(urls[i]);
+      text += data.text + '\n';
+    }
+  } finally { await worker.terminate(); }
+  return text;
+}
+
+function matchLocByName(locName) {
+  const norm = s => (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const n = norm(locName);
+  const hit = state.locations.find(l => norm(l.name).includes(n) || n.includes(norm(l.name)));
+  if (hit) return hit.id;
+  const kw = n.split(' ')[0];
+  const hit2 = kw && state.locations.find(l => norm(l.name).includes(kw));
+  return hit2 ? hit2.id : (state.locations[0]?.id || null);
+}
+
+async function processInboxItem(itemId) {
+  const it = inboxCache.find(x => x.id === itemId);
+  if (!it) return;
+  const btn = document.getElementById('proc-' + itemId);
+  const setP = t => { if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${t}`; } };
+  const pin = encodeURIComponent(state.serverPin);
+  const urls = it.photos.map(p => `/api/photo/${p}?pin=${pin}`);
+
+  try {
+    let rawText = '';
+    const pdfs = it.photos.filter(p => p.endsWith('.pdf'));
+    if (pdfs.length) {
+      setP('Leyendo PDF...');
+      for (const p of pdfs) {
+        const buf = await (await fetch(`/api/photo/${p}?pin=${pin}`)).arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({data: buf}).promise;
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const content = await (await pdf.getPage(i)).getTextContent();
+          rawText += content.items.map(x => x.str).join(' ') + '\n';
+        }
+      }
+    }
+    const imgs = urls.filter(u => !u.includes('.pdf'));
+    if (imgs.length) rawText += await ocrPhotos(imgs, setP);
+
+    setP('Armando factura...');
+    const parsed = parseInvoiceText(rawText);
+    const inv = {
+      id: state.nextId++,
+      locId: matchLocByName(it.loc),
+      supplier: parsed.supplier, number: parsed.number,
+      date: parsed.date || it.ts.split(' ')[0], total: parsed.total,
+      subtotal: parsed.subtotal || 0, iva: parsed.iva || 0,
+      status: 'pending', expenseNucleoId: null,
+      rawText: rawText || '(sin texto reconocido)',
+      photos: it.photos,
+      items: parsed.items.map((x,i) => {
+        const m = (state.productMappings||{})[x.code];
+        return { ...x, id: i, ingId: m?.ingId||null, ingName: m?.ingName||'',
+                 stockQty: (m?.factor && x.quantity) ? +((m.factor*x.quantity).toFixed(3)) : 0 };
+      })
+    };
+    state.invoices.unshift(inv);
+    saveState();
+    await fetch('/api/inbox/update', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({pin: state.serverPin, id: itemId, action: 'processed'})});
+    it.status = 'processed';
+    if (!parsed.items.length) showToast('OCR sin items detectados — cargalos mirando la foto.', 'warning');
+    showPage('review', inv.id);
+  } catch(e) {
+    showToast('Error procesando: ' + e.message, 'danger');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="bi bi-magic me-1"></i>Procesar'; }
+  }
+}
+
+async function deleteInboxItem(itemId) {
+  if (!confirm('¿Eliminar esta factura recibida? Se borra la foto del servidor.')) return;
+  await fetch('/api/inbox/update', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({pin: state.serverPin, id: itemId, action: 'delete'})});
+  inboxCache = inboxCache.filter(x => x.id !== itemId);
+  renderInbox();
+}
+
+function renderReviewPhotos(inv) {
+  const box = document.getElementById('review-photos');
+  if (!box) return;
+  if (!inv.photos || !inv.photos.length || !state.serverPin) { box.innerHTML = ''; return; }
+  const pin = encodeURIComponent(state.serverPin);
+  box.innerHTML = `<div class="card">
+    <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+      <small class="fw-semibold text-muted"><i class="bi bi-camera me-1"></i>Foto de la factura (click para agrandar)</small>
+      <button class="btn btn-sm btn-link p-0 small" data-bs-toggle="collapse" data-bs-target="#photos-collapse">Ver / ocultar</button>
+    </div>
+    <div class="collapse show" id="photos-collapse">
+      <div class="card-body d-flex gap-2" style="overflow-x:auto">
+        ${inv.photos.map(p => p.endsWith('.pdf')
+          ? `<a href="/api/photo/${p}?pin=${pin}" target="_blank" class="btn btn-outline-danger">Abrir PDF</a>`
+          : `<a href="/api/photo/${p}?pin=${pin}" target="_blank"><img src="/api/photo/${p}?pin=${pin}" style="max-height:420px;border-radius:8px;border:1px solid #ddd"></a>`).join('')}
+      </div>
+    </div></div>`;
+}
+
 // ── Empresas ─────────────────────────────────────────────────────────────
 const COMPANIES = [
   { name: 'UN CORTADO SA',  locs: ['palmas','unicenter','leloir'] },
@@ -1587,6 +1781,7 @@ function renderDashboard() {
   const invs = state.invoices;
   const warn = document.getElementById('no-locations-warn');
   warn.classList.toggle('d-none', state.locations.length > 0);
+  loadInbox();
 
   // Agrupar por empresa
   const groups = {};
