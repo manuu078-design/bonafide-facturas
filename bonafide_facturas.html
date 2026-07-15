@@ -1588,30 +1588,11 @@ function deleteLocation(locId) {
 // ═══════════════════════════════════════════════════════════════════════
 let inboxCache = [];
 
-function getServerPin(force) {
-  if (state.serverPin && !force) return state.serverPin;
-  const p = prompt('PIN de la bandeja de facturas (el mismo que usan los empleados):');
-  if (p) { state.serverPin = p.trim(); saveState(); }
-  return state.serverPin;
-}
-
 async function loadInbox() {
   const box = document.getElementById('inbox-container');
   if (!box || !IS_PROXIED) return;
-  if (!state.serverPin) {
-    box.innerHTML = `<div class="card p-3 d-flex flex-row align-items-center justify-content-between">
-      <span class="text-muted"><i class="bi bi-inbox me-2"></i>Bandeja de facturas de los locales</span>
-      <button class="btn btn-sm btn-outline-primary" onclick="getServerPin(true) && loadInbox()">Conectar con PIN</button>
-    </div>`;
-    return;
-  }
   try {
-    const r = await fetch('/api/inbox?pin=' + encodeURIComponent(state.serverPin));
-    if (r.status === 403) {
-      state.serverPin = null; saveState();
-      showToast('PIN de bandeja incorrecto.', 'warning');
-      return loadInbox();
-    }
+    const r = await fetch('/api/inbox');
     inboxCache = await r.json();
     renderInbox();
   } catch(e) { box.innerHTML = ''; }
@@ -1622,7 +1603,6 @@ function renderInbox() {
   if (!box) return;
   const items = inboxCache.filter(it => it.status === 'new');
   if (!items.length) { box.innerHTML = ''; return; }
-  const pin = encodeURIComponent(state.serverPin);
   box.innerHTML = `<div class="card border-primary">
     <div class="card-header py-3 d-flex justify-content-between align-items-center" style="background:#eef2ff">
       <h6 class="mb-0 fw-bold"><i class="bi bi-inbox-fill me-2 text-primary"></i>
@@ -1636,8 +1616,8 @@ function renderInbox() {
           <div class="card h-100">
             <div class="d-flex gap-1 p-2" style="overflow-x:auto">
               ${it.photos.map(p => p.endsWith('.pdf')
-                ? `<a href="/api/photo/${p}?pin=${pin}" target="_blank" class="d-flex align-items-center justify-content-center border rounded text-danger fw-bold" style="min-width:90px;height:110px;font-size:.8em">PDF</a>`
-                : `<a href="/api/photo/${p}?pin=${pin}" target="_blank"><img src="/api/photo/${p}?pin=${pin}" style="height:110px;border-radius:6px;border:1px solid #ddd"></a>`).join('')}
+                ? `<a href="/api/photo/${p}" target="_blank" class="d-flex align-items-center justify-content-center border rounded text-danger fw-bold" style="min-width:90px;height:110px;font-size:.8em">PDF</a>`
+                : `<a href="/api/photo/${p}" target="_blank"><img src="/api/photo/${p}" style="height:110px;border-radius:6px;border:1px solid #ddd"></a>`).join('')}
             </div>
             <div class="card-body pt-0 pb-2">
               <div class="fw-semibold">${esc(it.loc)}${it.supplier ? ` <span class="badge text-bg-light border">${esc(it.supplier)}</span>` : ''}</div>
@@ -1695,8 +1675,7 @@ async function processInboxItem(itemId) {
   if (!it) return;
   const btn = document.getElementById('proc-' + itemId);
   const setP = t => { if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>${t}`; } };
-  const pin = encodeURIComponent(state.serverPin);
-  const urls = it.photos.map(p => `/api/photo/${p}?pin=${pin}`);
+  const urls = it.photos.map(p => `/api/photo/${p}`);
 
   try {
     let rawText = '';
@@ -1704,7 +1683,7 @@ async function processInboxItem(itemId) {
     if (pdfs.length) {
       setP('Leyendo PDF...');
       for (const p of pdfs) {
-        const buf = await (await fetch(`/api/photo/${p}?pin=${pin}`)).arrayBuffer();
+        const buf = await (await fetch(`/api/photo/${p}`)).arrayBuffer();
         const pdf = await pdfjsLib.getDocument({data: buf}).promise;
         for (let i = 1; i <= pdf.numPages; i++) {
           const content = await (await pdf.getPage(i)).getTextContent();
@@ -1735,7 +1714,7 @@ async function processInboxItem(itemId) {
     state.invoices.unshift(inv);
     saveState();
     await fetch('/api/inbox/update', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({pin: state.serverPin, id: itemId, action: 'processed'})});
+      body: JSON.stringify({id: itemId, action: 'processed'})});
     it.status = 'processed';
     if (!parsed.items.length) showToast('OCR sin items detectados — cargalos mirando la foto.', 'warning');
     showPage('review', inv.id);
@@ -1748,7 +1727,7 @@ async function processInboxItem(itemId) {
 async function deleteInboxItem(itemId) {
   if (!confirm('¿Eliminar esta factura recibida? Se borra la foto del servidor.')) return;
   await fetch('/api/inbox/update', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({pin: state.serverPin, id: itemId, action: 'delete'})});
+    body: JSON.stringify({id: itemId, action: 'delete'})});
   inboxCache = inboxCache.filter(x => x.id !== itemId);
   renderInbox();
 }
@@ -1756,8 +1735,7 @@ async function deleteInboxItem(itemId) {
 function renderReviewPhotos(inv) {
   const box = document.getElementById('review-photos');
   if (!box) return;
-  if (!inv.photos || !inv.photos.length || !state.serverPin) { box.innerHTML = ''; return; }
-  const pin = encodeURIComponent(state.serverPin);
+  if (!inv.photos || !inv.photos.length) { box.innerHTML = ''; return; }
   box.innerHTML = `<div class="card">
     <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
       <small class="fw-semibold text-muted"><i class="bi bi-camera me-1"></i>Foto de la factura (click para agrandar)</small>
@@ -1766,8 +1744,8 @@ function renderReviewPhotos(inv) {
     <div class="collapse show" id="photos-collapse">
       <div class="card-body d-flex gap-2" style="overflow-x:auto">
         ${inv.photos.map(p => p.endsWith('.pdf')
-          ? `<a href="/api/photo/${p}?pin=${pin}" target="_blank" class="btn btn-outline-danger">Abrir PDF</a>`
-          : `<a href="/api/photo/${p}?pin=${pin}" target="_blank"><img src="/api/photo/${p}?pin=${pin}" style="max-height:420px;border-radius:8px;border:1px solid #ddd"></a>`).join('')}
+          ? `<a href="/api/photo/${p}" target="_blank" class="btn btn-outline-danger">Abrir PDF</a>`
+          : `<a href="/api/photo/${p}" target="_blank"><img src="/api/photo/${p}" style="max-height:420px;border-radius:8px;border:1px solid #ddd"></a>`).join('')}
       </div>
     </div></div>`;
 }

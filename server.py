@@ -23,7 +23,9 @@ HOST = "0.0.0.0"
 NUCLEO_API = "https://api-prod.nucleocheck.com"
 HTML_FILE  = pathlib.Path(__file__).parent / "bonafide_facturas.html"
 
-UPLOAD_PIN = os.environ.get("UPLOAD_PIN", "1234")
+# PIN deshabilitado (carga abierta). Para reactivarlo: poner un valor acá o
+# volver a leer la variable de entorno UPLOAD_PIN.
+UPLOAD_PIN = ""
 DATA_DIR   = pathlib.Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or
                           os.environ.get("DATA_DIR") or
                           (pathlib.Path(__file__).parent / "data"))
@@ -85,11 +87,6 @@ EMPLOYEE_HTML = """<!DOCTYPE html>
 <body>
 <header>🧾 Bonafide – Cargar factura</header>
 <main>
-  <div class="card" id="pin-card" style="display:none">
-    <label>PIN de acceso</label>
-    <input type="password" id="pin" inputmode="numeric" maxlength="8" placeholder="••••">
-    <p class="pin-note">Pedíselo al encargado. Se guarda en este dispositivo.</p>
-  </div>
   <div class="card">
     <label>Local</label>
     <select id="loc">
@@ -117,9 +114,6 @@ EMPLOYEE_HTML = """<!DOCTYPE html>
 let files = [];   // {name, type, data(base64 sin prefijo), preview}
 const $ = id => document.getElementById(id);
 
-// PIN guardado en el dispositivo
-if (!localStorage.getItem('bf_pin')) $('pin-card').style.display = 'block';
-else $('pin').value = localStorage.getItem('bf_pin');
 const savedLoc = localStorage.getItem('bf_loc');
 
 $('file').addEventListener('change', async e => {
@@ -178,11 +172,9 @@ function renderThumbs() {
 if (savedLoc) setTimeout(() => { $('loc').value = savedLoc; }, 0);
 
 async function send() {
-  const pin = $('pin').value.trim();
   const loc = $('loc').value;
   const msg = $('msg');
   msg.className = '';
-  if (!pin) { $('pin-card').style.display='block'; msg.className='err'; msg.textContent='Ingresá el PIN.'; return; }
   if (!loc) { msg.className='err'; msg.textContent='Elegí el local.'; return; }
   if (!files.length) { msg.className='err'; msg.textContent='Sacá al menos una foto.'; return; }
   const btn = $('send');
@@ -191,22 +183,19 @@ async function send() {
     const r = await fetch('/api/upload', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({pin, loc, note: $('note').value.trim(),
+      body: JSON.stringify({loc, note: $('note').value.trim(),
                             supplier: $('sup').value.trim(),
                             photos: files.map(f => ({name: f.name, type: f.type, data: f.data}))})
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || 'Error del servidor');
-    localStorage.setItem('bf_pin', pin);
     localStorage.setItem('bf_loc', loc);
-    $('pin-card').style.display = 'none';
     files = []; renderThumbs(); $('note').value = ''; $('sup').value = '';
     msg.className = 'ok';
     msg.textContent = '✅ Factura enviada. ¡Gracias! Podés cargar otra.';
   } catch(e) {
     msg.className = 'err';
     msg.textContent = '❌ ' + e.message;
-    if (/PIN/i.test(e.message)) { localStorage.removeItem('bf_pin'); $('pin-card').style.display='block'; }
   } finally {
     btn.disabled = false; btn.textContent = 'Enviar factura';
   }
@@ -272,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def _check_pin(self, pin):
-        if str(pin or "") != UPLOAD_PIN:
+        if UPLOAD_PIN and str(pin or "") != UPLOAD_PIN:
             self._json_error(403, "PIN incorrecto")
             return False
         return True
