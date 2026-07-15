@@ -1555,29 +1555,62 @@ function deleteLocation(locId) {
 // ═══════════════════════════════════════════════════════════════════════
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════════════
+// ── Empresas ─────────────────────────────────────────────────────────────
+const COMPANIES = [
+  { name: 'UN CORTADO SA',  locs: ['palmas','unicenter','leloir'] },
+  { name: 'DE LOS CAFE SA', locs: ['obligado','juramento'] },
+];
+function companyOfInv(inv) {
+  const loc = state.locations.find(l => l.id === inv.locId);
+  const n = ((loc||{}).name||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const c = COMPANIES.find(c => c.locs.some(k => n.includes(k)));
+  return c ? c.name : 'Otros locales';
+}
+const fmt$ = n => '$' + (n||0).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});
+
+let dashOnlyUnpaid = false;
+function toggleDashFilter(el) { dashOnlyUnpaid = el.checked; renderDashboard(); }
+
+function togglePaid(invId) {
+  const inv = state.invoices.find(i => i.id === invId);
+  if (!inv) return;
+  if (inv.paid) {
+    if (!confirm('¿Volver a marcar esta factura como SIN PAGAR?')) return;
+    inv.paid = false; inv.paidDate = null;
+  } else {
+    inv.paid = true; inv.paidDate = new Date().toISOString().slice(0,10);
+  }
+  saveState(); renderDashboard();
+}
+
 function renderDashboard() {
   const invs = state.invoices;
   const warn = document.getElementById('no-locations-warn');
   warn.classList.toggle('d-none', state.locations.length > 0);
 
+  // Agrupar por empresa
+  const groups = {};
+  for (const inv of invs) (groups[companyOfInv(inv)] = groups[companyOfInv(inv)] || []).push(inv);
+  const order = [...COMPANIES.map(c=>c.name), 'Otros locales'].filter(n => groups[n]);
+
+  // Tarjetas resumen: adeudado por empresa
   const stats = document.getElementById('invoice-stats');
-  const total = invs.length;
-  const pending = invs.filter(i => i.status==='pending').length;
-  const exp = invs.filter(i => i.status==='expense_sent').length;
-  const done = invs.filter(i => i.status==='done').length;
-  stats.innerHTML = `
-    <div class="col-6 col-md-3"><div class="card p-3 text-center">
-      <div class="fs-2 fw-bold text-primary">${total}</div><div class="small text-muted">Facturas</div>
-    </div></div>
-    <div class="col-6 col-md-3"><div class="card p-3 text-center">
-      <div class="fs-2 fw-bold text-warning">${pending}</div><div class="small text-muted">Pendientes</div>
-    </div></div>
-    <div class="col-6 col-md-3"><div class="card p-3 text-center">
-      <div class="fs-2 fw-bold text-info">${exp}</div><div class="small text-muted">Gasto cargado</div>
-    </div></div>
-    <div class="col-6 col-md-3"><div class="card p-3 text-center">
-      <div class="fs-2 fw-bold text-success">${done}</div><div class="small text-muted">Completas</div>
-    </div></div>`;
+  stats.innerHTML = COMPANIES.map(c => {
+    const g = groups[c.name] || [];
+    const unpaid = g.filter(i => !i.paid);
+    const owed = unpaid.reduce((s,i) => s + (i.total||0), 0);
+    return `<div class="col-12 col-md-6"><div class="card p-3">
+      <div class="d-flex justify-content-between align-items-center">
+        <div>
+          <div class="fw-bold"><i class="bi bi-building me-1 text-muted"></i>${c.name}</div>
+          <div class="small text-muted">${g.length} factura${g.length!==1?'s':''} · ${unpaid.length} sin pagar</div>
+        </div>
+        <div class="text-end">
+          <div class="fs-4 fw-bold ${owed>0?'text-danger':'text-success'}">${fmt$(owed)}</div>
+          <div class="small text-muted">adeudado</div>
+        </div>
+      </div></div></div>`;
+  }).join('');
 
   const cont = document.getElementById('invoice-list-container');
   if (!invs.length) {
@@ -1589,38 +1622,60 @@ function renderDashboard() {
       </div></div>`;
     return;
   }
+
   const loc = (id) => (state.locations.find(l=>l.id===id)||{}).name || '—';
-  cont.innerHTML = `<div class="card"><div class="card-body p-0">
-    <table class="table table-hover mb-0">
-      <thead class="table-light">
-        <tr>
-          <th class="ps-3">Fecha</th><th>Proveedor</th><th>Local</th>
-          <th>N° Factura</th><th class="text-end">Total</th>
-          <th class="text-center">Estado</th><th class="pe-3"></th>
-        </tr>
-      </thead>
-      <tbody>
-        ${invs.map(inv=>`<tr>
-          <td class="ps-3 small text-muted">${inv.date||'—'}</td>
-          <td class="fw-semibold">${esc(inv.supplier||'—')}</td>
-          <td class="small text-muted">${esc(loc(inv.locId))}</td>
-          <td class="font-monospace small">${esc(inv.number||'—')}</td>
-          <td class="text-end fw-semibold">${inv.total?'$'+inv.total.toFixed(2):'—'}</td>
-          <td class="text-center"><span class="status-badge status-${inv.status}">
-            ${{pending:'Pendiente',expense_sent:'Gasto ✓',done:'Completa'}[inv.status]||inv.status}
-          </span></td>
-          <td class="pe-3 text-end text-nowrap">
-            <button class="btn btn-sm btn-outline-secondary" onclick="showPage('review',${inv.id})">
-              <i class="bi bi-eye"></i> Revisar
-            </button>
-            <button class="btn btn-sm btn-outline-danger ms-1" title="Eliminar factura"
-                    onclick="deleteInvoice(${inv.id})">
-              <i class="bi bi-trash3"></i>
-            </button>
-          </td>
-        </tr>`).join('')}
-      </tbody>
-    </table></div></div>`;
+  const row = inv => `<tr>
+    <td class="ps-3 small text-muted">${inv.date||'—'}</td>
+    <td class="fw-semibold">${esc(inv.supplier||'—')}</td>
+    <td class="small text-muted">${esc(loc(inv.locId))}</td>
+    <td class="font-monospace small">${esc(inv.number||'—')}</td>
+    <td class="text-end fw-semibold">${inv.total?fmt$(inv.total):'—'}</td>
+    <td class="text-center"><span class="status-badge status-${inv.status}">
+      ${{pending:'Pendiente',expense_sent:'Gasto ✓',done:'Completa'}[inv.status]||inv.status}
+    </span></td>
+    <td class="text-center">${inv.paid
+      ? `<button class="btn btn-sm btn-success" title="Pagada el ${inv.paidDate||'—'} — click para desmarcar" onclick="togglePaid(${inv.id})"><i class="bi bi-check-lg me-1"></i>PAGADO</button>`
+      : `<button class="btn btn-sm btn-outline-danger" title="Click para marcar como pagada" onclick="togglePaid(${inv.id})">SIN PAGAR</button>`}</td>
+    <td class="pe-3 text-end text-nowrap">
+      <button class="btn btn-sm btn-outline-secondary" title="Revisar" onclick="showPage('review',${inv.id})">
+        <i class="bi bi-eye"></i>
+      </button>
+      <button class="btn btn-sm btn-outline-danger ms-1" title="Eliminar factura" onclick="deleteInvoice(${inv.id})">
+        <i class="bi bi-trash3"></i>
+      </button>
+    </td>
+  </tr>`;
+
+  cont.innerHTML =
+    `<div class="form-check form-switch mb-3">
+      <input class="form-check-input" type="checkbox" id="only-unpaid" ${dashOnlyUnpaid?'checked':''} onchange="toggleDashFilter(this)">
+      <label class="form-check-label" for="only-unpaid">Mostrar solo facturas sin pagar</label>
+    </div>` +
+    order.map(compName => {
+      const all = groups[compName];
+      const unpaid = all.filter(i => !i.paid);
+      const owed = unpaid.reduce((s,i) => s + (i.total||0), 0);
+      const list = dashOnlyUnpaid ? unpaid : all;
+      if (!list.length) return '';
+      return `<div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+          <span class="fw-bold"><i class="bi bi-building me-2 text-muted"></i>${compName}</span>
+          <span class="small fw-semibold ${owed>0?'text-danger':'text-success'}">
+            ${unpaid.length ? `${unpaid.length} sin pagar · adeudado ${fmt$(owed)}` : '✓ Todo pagado'}
+          </span>
+        </div>
+        <div class="card-body p-0">
+        <table class="table table-hover mb-0">
+          <thead class="table-light">
+            <tr>
+              <th class="ps-3">Fecha</th><th>Proveedor</th><th>Local</th>
+              <th>N° Factura</th><th class="text-end">Total</th>
+              <th class="text-center">Estado</th><th class="text-center">Pago</th><th class="pe-3"></th>
+            </tr>
+          </thead>
+          <tbody>${list.map(row).join('')}</tbody>
+        </table></div></div>`;
+    }).join('');
 }
 
 function deleteInvoice(invId) {
