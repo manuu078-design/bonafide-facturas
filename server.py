@@ -138,18 +138,18 @@ function readB64(f) {
   });
 }
 
-// Comprimir imagen a máx 1800px JPEG 0.82 para que suba rápido con 4G
+// Comprimir imagen (máx 2800px para que el OCR pueda leer el texto chico)
 function compress(f) {
   return new Promise(res => {
     const img = new Image();
     img.onload = () => {
-      const MAX = 1800;
+      const MAX = 2800;
       let w = img.width, h = img.height;
       if (Math.max(w,h) > MAX) { const k = MAX/Math.max(w,h); w = Math.round(w*k); h = Math.round(h*k); }
       const cv = document.createElement('canvas');
       cv.width = w; cv.height = h;
       cv.getContext('2d').drawImage(img, 0, 0, w, h);
-      const url = cv.toDataURL('image/jpeg', 0.82);
+      const url = cv.toDataURL('image/jpeg', 0.85);
       res({name: f.name.replace(/\\.[^.]+$/,'') + '.jpg', type: 'image/jpeg',
            data: url.split(',')[1], preview: url});
       URL.revokeObjectURL(img.src);
