@@ -363,6 +363,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", len(data))
+        if "html" in ctype:
+            # que el navegador siempre traiga la última versión de la app
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
         self._cors_headers()
         self.end_headers()
         self.wfile.write(data)
