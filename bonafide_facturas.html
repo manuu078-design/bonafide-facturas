@@ -471,8 +471,6 @@ async function getIngredients(jwt, locId) {
     if (!Array.isArray(list)) {
       list = list.Ingredients || list.Items || list.Data || [];
     }
-    // Excluir ingredientes eliminados/desactivados en Nucleo
-    list = list.filter(i => i.IsActive !== false);
     if (list.length > 0) { cachedIngredients[locId] = list; return list; }
   }
   return [];
@@ -1194,6 +1192,14 @@ async function createPurchaseOrder(invId) {
     const ings = await getIngredients(jwt, loc.id);
     const byId = {}; ings.forEach(i => { byId[i.Id || i.id] = i; });
 
+    // Bloquear ingredientes desconocidos o desactivados: sin su ficha no se
+    // puede convertir la cantidad y la orden saldría con números incorrectos.
+    const malos = mapped.filter(it => !byId[it.ingId] || byId[it.ingId].IsActive === false);
+    if (malos.length) {
+      throw new Error('Estos artículos están mapeados a ingredientes eliminados/desactivados en Nucleo — tocá "Buscar ingrediente" y elegí el correcto: '
+        + malos.map(i => i.description.slice(0,30)).join(' · '));
+    }
+
     // Ítems: cantidad en UNIDAD DE COMPRA (ej. Kg) = stockQty / UnitRelationship
     const items = mapped.map(it => {
       const ing = byId[it.ingId] || {};
@@ -1391,6 +1397,8 @@ function openIngPicker(inputEl) {
 
 function renderIngList(ings, q) {
   const list = document.getElementById('ing-list');
+  // Ocultar del buscador los ingredientes eliminados/desactivados en Nucleo
+  ings = ings.filter(i => i.IsActive !== false);
   let filtered = ings;
   if (q) { const ql = q.toLowerCase(); filtered = ings.filter(i => (i.Name||i.name||'').toLowerCase().includes(ql)); }
   if (!filtered.length) {
