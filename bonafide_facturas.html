@@ -1987,11 +1987,12 @@ function refreshCurrentList() {
 // PROVEEDORES
 // ═══════════════════════════════════════════════════════════════════════
 let currentSupplier = null;
+let currentSupplierComp = null;
 let suppliersCache = [];
 
-function supplierGroups() {
+function supplierGroups(invList) {
   const groups = {};
-  for (const inv of state.invoices) {
+  for (const inv of invList) {
     const key = normName(inv.supplier) || '(sin proveedor)';
     if (!groups[key]) groups[key] = { name: (inv.supplier||'').trim() || '(sin proveedor)', invs: [] };
     groups[key].invs.push(inv);
@@ -2007,53 +2008,70 @@ function supplierGroups() {
 function renderSuppliers() {
   const box = document.getElementById('suppliers-list');
   if (!box) return;
-  suppliersCache = supplierGroups();
-  if (!suppliersCache.length) {
+  if (!state.invoices.length) {
     box.innerHTML = `<div class="card text-center py-5"><div class="card-body">
       <i class="bi bi-truck" style="font-size:3rem;color:#ccc"></i>
       <p class="mt-3 text-muted">Todavía no hay facturas cargadas.</p></div></div>`;
     return;
   }
-  const totalOwed = suppliersCache.reduce((s,g) => s + g.owed, 0);
-  box.innerHTML = `<div class="card">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <span class="fw-bold">Deuda por proveedor</span>
-      <span class="small fw-semibold ${totalOwed>0?'text-danger':'text-success'}">Total adeudado: ${fmt$(totalOwed)}</span>
-    </div>
-    <div class="card-body p-0"><table class="table table-hover mb-0">
-      <thead class="table-light"><tr>
-        <th class="ps-3">Proveedor</th>
-        <th class="text-center">Facturas</th>
-        <th class="text-center">Sin pagar</th>
-        <th class="text-end">Deuda</th>
-        <th class="text-center">Más vieja</th>
-        <th class="pe-3"></th>
-      </tr></thead>
-      <tbody>
-        ${suppliersCache.map((g,i) => `<tr style="cursor:pointer" onclick="openSupplier(${i})">
-          <td class="ps-3 fw-semibold">${esc(g.name)}</td>
-          <td class="text-center small text-muted">${g.invs.length}</td>
-          <td class="text-center">${g.nUnpaid ? `<span class="badge bg-danger">${g.nUnpaid}</span>` : '<span class="text-success">✓</span>'}</td>
-          <td class="text-end fw-bold ${g.owed>0?'text-danger':'text-muted'}">${g.owed>0?fmt$(g.owed):'—'}</td>
-          <td class="text-center small">${g.maxDays===null?'<span class="text-muted">—</span>':`<span class="${g.maxDays>=30?'text-danger fw-bold':g.maxDays>=15?'text-warning fw-bold':'text-muted'}">${g.maxDays} días</span>`}</td>
-          <td class="pe-3 text-end text-muted"><i class="bi bi-chevron-right"></i></td>
-        </tr>`).join('')}
-      </tbody>
-    </table></div></div>`;
+  // Agrupar por empresa y, dentro de cada una, por proveedor
+  const byComp = {};
+  for (const inv of state.invoices) {
+    const c = companyOfInv(inv);
+    (byComp[c] = byComp[c] || []).push(inv);
+  }
+  const order = [...COMPANIES.map(c=>c.name), 'Otros locales'].filter(n => byComp[n]);
+  suppliersCache = [];
+  box.innerHTML = order.map(comp => {
+    const rows = supplierGroups(byComp[comp]);
+    const base = suppliersCache.length;
+    rows.forEach(r => suppliersCache.push({ ...r, comp }));
+    const totalOwed = rows.reduce((s,g) => s + g.owed, 0);
+    return `<div class="card mb-4">
+      <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span class="fw-bold"><i class="bi bi-building me-2 text-muted"></i>${esc(comp)}</span>
+        <span class="small fw-semibold ${totalOwed>0?'text-danger':'text-success'}">Adeudado: ${fmt$(totalOwed)}</span>
+      </div>
+      <div class="card-body p-0"><table class="table table-hover mb-0">
+        <thead class="table-light"><tr>
+          <th class="ps-3">Proveedor</th>
+          <th class="text-center">Facturas</th>
+          <th class="text-center">Sin pagar</th>
+          <th class="text-end">Deuda</th>
+          <th class="text-center">Más vieja</th>
+          <th class="pe-3"></th>
+        </tr></thead>
+        <tbody>
+          ${rows.map((g,i) => `<tr style="cursor:pointer" onclick="openSupplier(${base+i})">
+            <td class="ps-3 fw-semibold">${esc(g.name)}</td>
+            <td class="text-center small text-muted">${g.invs.length}</td>
+            <td class="text-center">${g.nUnpaid ? `<span class="badge bg-danger">${g.nUnpaid}</span>` : '<span class="text-success">✓</span>'}</td>
+            <td class="text-end fw-bold ${g.owed>0?'text-danger':'text-muted'}">${g.owed>0?fmt$(g.owed):'—'}</td>
+            <td class="text-center small">${g.maxDays===null?'<span class="text-muted">—</span>':`<span class="${g.maxDays>=30?'text-danger fw-bold':g.maxDays>=15?'text-warning fw-bold':'text-muted'}">${g.maxDays} días</span>`}</td>
+            <td class="pe-3 text-end text-muted"><i class="bi bi-chevron-right"></i></td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div></div>`;
+  }).join('');
 }
 
 function openSupplier(idx) {
   const g = suppliersCache[idx];
   if (!g) return;
   currentSupplier = g.name;
+  currentSupplierComp = g.comp;
   showPage('supplier');
 }
 
 function renderSupplierDetail(name) {
   const key = normName(name) || '(sin proveedor)';
-  const invs = state.invoices.filter(i => (normName(i.supplier) || '(sin proveedor)') === key)
+  const invs = state.invoices.filter(i =>
+      (normName(i.supplier) || '(sin proveedor)') === key &&
+      (!currentSupplierComp || companyOfInv(i) === currentSupplierComp))
     .slice().sort((a,b) => (daysUnpaid(b) ?? -1) - (daysUnpaid(a) ?? -1));
-  document.getElementById('supplier-title').textContent = name || '(sin proveedor)';
+  document.getElementById('supplier-title').innerHTML =
+    esc(name || '(sin proveedor)') +
+    (currentSupplierComp ? ` <span class="fs-6 text-muted fw-normal">· ${esc(currentSupplierComp)}</span>` : '');
 
   const unpaid = invs.filter(i => !i.paid);
   const owed = unpaid.reduce((s,i) => s + (i.total||0), 0);
