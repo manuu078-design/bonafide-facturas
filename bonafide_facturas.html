@@ -471,6 +471,8 @@ async function getIngredients(jwt, locId) {
     if (!Array.isArray(list)) {
       list = list.Ingredients || list.Items || list.Data || [];
     }
+    // Excluir ingredientes eliminados/desactivados en Nucleo
+    list = list.filter(i => i.IsActive !== false);
     if (list.length > 0) { cachedIngredients[locId] = list; return list; }
   }
   return [];
