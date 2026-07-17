@@ -332,7 +332,7 @@ let state = {
   locations: [],        // [{id,name,email,password,jwt,companyName,companyId,cashDrawerId}]
   invoices:  [],        // [{id,locId,supplier,number,date,total,status,expenseNucleoId,items:[],rawText}]
   nextId: 1,
-  productMappings: {},  // { "código6dígitos": { ingId, ingName } } — persiste entre sesiones
+  productMappings: {},  // { locId: { "código": { ingId, ingName, ingUnit, factor } } } — por local
 };
 let currentInvId = null;
 let activeIngRowEl = null;
@@ -348,6 +348,32 @@ function saveState() {
   localStorage.setItem('bonafide_state', JSON.stringify(state));
 }
 loadState();
+
+// ── Mapeos POR LOCAL ─────────────────────────────────────────────────────
+// Cada local tiene su propia base de ingredientes en Nucleo (IDs distintos),
+// así que los mapeos código→ingrediente se guardan separados por local.
+function locMaps(locId) {
+  if (!state.productMappings || typeof state.productMappings !== 'object') state.productMappings = {};
+  const k = String(locId || 0);
+  if (!state.productMappings[k]) state.productMappings[k] = {};
+  return state.productMappings[k];
+}
+function legacyMap(code) { return (state.productMappingsLegacy || {})[code]; }
+function normName(s) {
+  return (s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
+}
+// Migración: el formato viejo era plano { "941030": {ingId...} } y mezclaba
+// locales. Se archiva como "legado": al abrir una factura, la app busca el
+// ingrediente por NOMBRE en el local correspondiente y lo adopta.
+(function migrateMappings() {
+  const pm = state.productMappings || {};
+  const isFlat = Object.values(pm).some(v => v && typeof v === 'object' && 'ingId' in v);
+  if (isFlat) {
+    state.productMappingsLegacy = Object.assign({}, state.productMappingsLegacy || {}, pm);
+    state.productMappings = {};
+    saveState();
+  }
+})();
 
 // ═══════════════════════════════════════════════════════════════════════
 // NUCLEO API
@@ -864,7 +890,7 @@ async function processUpload() {
       status: 'pending',
       expenseNucleoId: null, rawText,
       items: meta.items.map((it,i) => {
-        const m = (state.productMappings||{})[it.code];
+        const m = locMaps(locId)[it.code];
         return { ...it, id: i, ingId: m?.ingId||null, ingName: m?.ingName||'',
                  stockQty: (m?.factor && it.quantity) ? +((m.factor*it.quantity).toFixed(3)) : 0 };
       })
@@ -929,17 +955,35 @@ async function backfillStockSuggestions(inv) {
   try {
     const jwt = await getValidJwt(loc);
     const ings = await getIngredients(jwt, loc.id);
-    const byId = {};
+    const byId = {}, byName = {};
     ings.forEach(i => { byId[i.Id || i.id] = i; });
+    ings.forEach(i => { if (i.IsActive !== false) byName[normName(i.Name || i.name)] = i; });
+    const maps = locMaps(inv.locId);
 
     let changed = false;
-    for (const m of Object.values(state.productMappings || {})) {
+    for (const m of Object.values(maps)) {
       const ing = m.ingId && byId[m.ingId];
       if (ing) {
         const u = ing.MeasurementUnitName || '';
         if (u && m.ingUnit !== u) { m.ingUnit = u; changed = true; }
       }
     }
+
+    // Adoptar mapeos del formato viejo (global): buscar el ingrediente por
+    // NOMBRE en este local. Si existe, se memoriza con el ID correcto del local.
+    document.querySelectorAll('#items-tbody tr').forEach(row => {
+      const code = row.querySelector('.item-code')?.value?.trim();
+      if (!code || maps[code]) return;
+      const leg = legacyMap(code);
+      if (!leg) return;
+      const hit = byName[normName(leg.ingName)];
+      if (!hit) return;
+      maps[code] = { ingId: hit.Id, ingName: hit.Name,
+                     ingUnit: hit.MeasurementUnitName || leg.ingUnit || '', factor: leg.factor };
+      changed = true;
+      const idEl = row.querySelector('.item-ing-id'), nEl = row.querySelector('.item-ing-name');
+      if (idEl && !idEl.value) { idEl.value = hit.Id; if (nEl) nEl.value = hit.Name; }
+    });
     if (changed) saveState();
 
     // Recalcular solo los campos automáticos (no tocar lo editado a mano)
@@ -948,7 +992,7 @@ async function backfillStockSuggestions(inv) {
       if (!el || (el.value && el.dataset.auto !== '1')) return;
       const code = row.querySelector('.item-code')?.value?.trim();
       const qty  = parseFloat(row.querySelector('.item-qty')?.value) || 0;
-      const m = (state.productMappings || {})[code];
+      const m = maps[code];
       if (!m || !qty) return;
       const per = m.factor || suggestPerBulto(row.querySelector('.item-desc')?.value, m.ingUnit);
       if (per) { el.value = +((per * qty).toFixed(3)); el.dataset.auto = '1'; }
@@ -973,7 +1017,7 @@ function renderItemsTable(items) {
         <input type="text" class="form-control form-control-sm item-ing-name" value="${esc(it.ingName||'')}"
                placeholder="Buscar ingrediente..." readonly style="background:#fff;cursor:pointer"
                onclick="openIngPicker(this)">
-        ${it.ingId && it.code && (state.productMappings||{})[it.code]?.ingId === it.ingId
+        ${it.ingId && it.code && locMaps((state.invoices.find(i=>i.id===currentInvId)||{}).locId)[it.code]?.ingId === it.ingId
           ? '<div class="text-success" style="font-size:0.72em;margin-top:2px"><i class="bi bi-pin-fill"></i> Memorizado</div>'
           : ''}
       </td>
@@ -1265,8 +1309,8 @@ async function createPurchaseOrder(invId) {
     // Memorizar el factor de conversión bulto→stock de cada producto:
     // la próxima factura con estos códigos calcula la cantidad sola.
     for (const item of mapped) {
-      if (item.code && item.quantity > 0 && item.stockQty > 0 && state.productMappings?.[item.code]) {
-        state.productMappings[item.code].factor = +((item.stockQty / item.quantity).toFixed(6));
+      if (item.code && item.quantity > 0 && item.stockQty > 0 && locMaps(loc.id)[item.code]) {
+        locMaps(loc.id)[item.code].factor = +((item.stockQty / item.quantity).toFixed(6));
       }
     }
 
@@ -1341,8 +1385,8 @@ async function sendStock(invId) {
         `Factura #${inv.number||'?'} - ${inv.supplier}`, loc.id);
       ok++;
       // Memorizar el factor de conversión bulto→stock para este código
-      if (item.code && item.quantity > 0 && state.productMappings?.[item.code]) {
-        state.productMappings[item.code].factor = +(item.stockQty / item.quantity).toFixed(6);
+      if (item.code && item.quantity > 0 && locMaps(loc.id)[item.code]) {
+        locMaps(loc.id)[item.code].factor = +(item.stockQty / item.quantity).toFixed(6);
       }
     } catch(e) {
       errors.push(item.ingName + ': ' + e.message);
@@ -1421,11 +1465,12 @@ function selectIng(id, name, unit) {
   // Guardar mapeo permanente: código producto → ingrediente Nucleo
   const code = activeIngRowEl.querySelector('.item-code')?.value?.trim();
   if (code) {
-    if (!state.productMappings) state.productMappings = {};
-    const prev = state.productMappings[code];
+    const inv = state.invoices.find(i => i.id === currentInvId);
+    const maps = locMaps(inv ? inv.locId : 0);
+    const prev = maps[code];
     const isNew = !prev;
     // Conservar el factor de conversión si se re-selecciona el mismo ingrediente
-    state.productMappings[code] = { ingId: id, ingName: name, ingUnit: unit || prev?.ingUnit || '',
+    maps[code] = { ingId: id, ingName: name, ingUnit: unit || prev?.ingUnit || '',
       factor: (prev && prev.ingId === id) ? prev.factor : undefined };
     saveState();
     // Autocompletar "Cant. stock" si está vacía: factor memorizado o sugerencia automática
@@ -1433,7 +1478,7 @@ function selectIng(id, name, unit) {
     const stockEl = activeIngRowEl.querySelector('.item-stock-qty');
     const qty = parseFloat(qtyEl?.value) || 0;
     if (stockEl && !(parseFloat(stockEl.value) > 0) && qty > 0) {
-      const m = state.productMappings[code];
+      const m = maps[code];
       const per = m.factor || suggestPerBulto(activeIngRowEl.querySelector('.item-desc')?.value, m.ingUnit);
       if (per) stockEl.value = +((per * qty).toFixed(3));
     }
@@ -1458,8 +1503,11 @@ function clearIngredient() {
   const code = activeIngRowEl.querySelector('.item-code')?.value?.trim();
   activeIngRowEl.querySelector('.item-ing-id').value = '';
   activeIngRowEl.querySelector('.item-ing-name').value = '';
-  if (code && state.productMappings?.[code]) {
-    delete state.productMappings[code];
+  const inv = state.invoices.find(i => i.id === currentInvId);
+  const maps = locMaps(inv ? inv.locId : 0);
+  if (code && maps[code]) {
+    delete maps[code];
+    if (state.productMappingsLegacy) delete state.productMappingsLegacy[code];
     saveState();
     showToast(`🗑️ Mapeo de código ${code} eliminado`, 'info');
   }
@@ -1474,59 +1522,58 @@ function clearIngredient() {
 function renderMappings() {
   const cont = document.getElementById('mappings-list');
   if (!cont) return;
-  const mappings = state.productMappings || {};
-  const entries = Object.entries(mappings);
-  if (!entries.length) {
+  const byLoc = state.productMappings || {};
+  const groups = Object.entries(byLoc).filter(([,maps]) => Object.keys(maps||{}).length);
+  const legacy = Object.keys(state.productMappingsLegacy || {}).length;
+  if (!groups.length && !legacy) {
     cont.innerHTML = `<div class="text-muted text-center py-4 small px-3">
       <i class="bi bi-pin-map fs-3 d-block mb-2 opacity-50"></i>
       Sin mapeos todavía.<br>
-      Al asignar un ingrediente a un artículo, el código se memoriza automáticamente para facturas futuras.
+      Al asignar un ingrediente a un artículo, el código se memoriza para futuras facturas <strong>de ese local</strong>.
     </div>`;
     return;
   }
-  cont.innerHTML = `<table class="table table-sm table-hover mb-0">
-    <thead class="table-light">
-      <tr>
-        <th class="ps-3 small text-muted">Código</th>
-        <th class="small text-muted">Ingrediente Nucleo</th>
-        <th class="pe-3"></th>
-      </tr>
-    </thead>
-    <tbody>
+  const locName = id => (state.locations.find(l => String(l.id) === String(id)) || {}).name || ('Local ' + id);
+  cont.innerHTML = groups.map(([locId, maps]) => {
+    const entries = Object.entries(maps);
+    return `<div class="px-3 pt-2 pb-1 small fw-bold text-muted border-top">
+        <i class="bi bi-shop me-1"></i>${esc(locName(locId))} <span class="fw-normal">(${entries.length})</span></div>
+      <table class="table table-sm table-hover mb-0"><tbody>
       ${entries.sort((a,b)=>a[0].localeCompare(b[0])).map(([code, m]) => `<tr>
-        <td class="ps-3 font-monospace small fw-semibold">${esc(code)}</td>
+        <td class="ps-3 font-monospace small fw-semibold" style="width:90px">${esc(code)}</td>
         <td class="small"><i class="bi bi-check-circle-fill text-success me-1"></i>${esc(m.ingName)}</td>
         <td class="pe-3 text-end">
           <button class="btn btn-sm btn-outline-danger py-0 px-2" style="font-size:.78em"
-                  onclick="deleteMapping('${code.replace(/'/g,"\\'")}')">
+                  onclick="deleteMapping('${String(locId)}','${code.replace(/'/g,"\\'")}')">
             <i class="bi bi-trash3"></i>
           </button>
         </td>
       </tr>`).join('')}
-    </tbody>
-  </table>
-  <div class="px-3 py-2 text-muted small border-top">
-    <i class="bi bi-info-circle me-1"></i>${entries.length} mapeo${entries.length!==1?'s':''} guardado${entries.length!==1?'s':''}
-  </div>`;
+      </tbody></table>`;
+  }).join('') +
+  (legacy ? `<div class="px-3 py-2 text-muted small border-top">
+    <i class="bi bi-clock-history me-1"></i>${legacy} mapeos del formato anterior en reserva:
+    se adoptan solos (por nombre) al abrir una factura de cada local.</div>` : '');
 }
 
-function deleteMapping(code) {
-  if (!state.productMappings) return;
-  delete state.productMappings[code];
+function deleteMapping(locId, code) {
+  const maps = locMaps(locId);
+  delete maps[code];
   saveState();
   renderMappings();
   showToast(`🗑️ Mapeo de código ${code} eliminado`, 'info');
 }
 
 function clearAllMappings() {
-  if (!Object.keys(state.productMappings||{}).length) {
-    showToast('No hay mapeos guardados.', 'info'); return;
-  }
-  if (!confirm(`¿Borrar los ${Object.keys(state.productMappings).length} mapeos guardados?`)) return;
+  const total = Object.values(state.productMappings||{}).reduce((a,m)=>a+Object.keys(m||{}).length,0)
+              + Object.keys(state.productMappingsLegacy||{}).length;
+  if (!total) { showToast('No hay mapeos guardados.', 'info'); return; }
+  if (!confirm(`¿Borrar los ${total} mapeos guardados (todos los locales)?`)) return;
   state.productMappings = {};
+  state.productMappingsLegacy = {};
   saveState();
   renderMappings();
-  showToast('Todos los mape:t am;ron eliminados.', 'info');
+  showToast('Todos los mapeos fueron eliminados.', 'info');
 }
 
 function renderSettings() {
@@ -1798,9 +1845,10 @@ async function processInboxItem(itemId) {
 
     setP('Armando factura...');
     const parsed = parseInvoiceText(rawText);
+    const invLocId = matchLocByName(it.loc);
     const inv = {
       id: state.nextId++,
-      locId: matchLocByName(it.loc),
+      locId: invLocId,
       supplier: it.supplier || parsed.supplier, number: parsed.number,
       date: parsed.date || it.ts.split(' ')[0], total: parsed.total,
       subtotal: parsed.subtotal || 0, iva: parsed.iva || 0,
@@ -1808,7 +1856,7 @@ async function processInboxItem(itemId) {
       rawText: rawText || '(sin texto reconocido)',
       photos: it.photos,
       items: parsed.items.map((x,i) => {
-        const m = (state.productMappings||{})[x.code];
+        const m = locMaps(invLocId)[x.code];
         return { ...x, id: i, ingId: m?.ingId||null, ingName: m?.ingName||'',
                  stockQty: (m?.factor && x.quantity) ? +((m.factor*x.quantity).toFixed(3)) : 0 };
       })
