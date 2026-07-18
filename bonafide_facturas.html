@@ -1301,6 +1301,35 @@ async function createPurchaseOrder(invId) {
     const ivaRate  = subtotal > 0 ? tax / subtotal : 0;
     items.forEach(i => { i.UnitCost = +(i.UnitCostNoTax * (1 + ivaRate)).toFixed(2); });
 
+    // Sin artículos de stock: Nucleo exige al menos un ítem en la orden.
+    // Se usa un ingrediente genérico "Compras sin stock" (se crea solo si falta).
+    if (!items.length) {
+      let gen = ings.find(i => i.IsActive !== false && /compras sin stock/i.test(i.Name||''));
+      if (!gen) {
+        const base = await nucleoReq('GET','Ingredient/FindById/'+(ings[0].Id||ings[0].id),null,jwt);
+        if (base.status !== 200 || !base.data) throw new Error('No pude leer un ingrediente base para crear "Compras sin stock".');
+        const dto = base.data;
+        dto.Id = 0; dto.Name = 'Compras sin stock'; dto.Code = null;
+        dto.UnitRelationship = 1; dto.MinStock = 0; dto.MaxStock = 0; dto.IsActive = true;
+        if (dto.MeasurementUnitId != null) dto.PurchaseMeasurementUnitId = dto.MeasurementUnitId;
+        const rs = await nucleoReq('POST','Ingredient/SaveIngredient',dto,jwt);
+        const vr2 = rs.data && rs.data.ValidationResult;
+        if (rs.status !== 200 || (vr2 && vr2.HasErrors)) {
+          throw new Error('No pude crear el ingrediente "Compras sin stock" en Nucleo: '
+            + (((vr2||{}).ErrorMessages)||['HTTP '+rs.status]).join(', ')
+            + '. Crealo a mano en Nucleo (Ingredientes) y reintentá.');
+        }
+        delete cachedIngredients[loc.id];
+        const ings2 = await getIngredients(jwt, loc.id);
+        gen = ings2.find(i => i.IsActive !== false && /compras sin stock/i.test(i.Name||''));
+        if (!gen) throw new Error('Creé "Compras sin stock" pero no aparece en la lista — reintentá en unos segundos.');
+      }
+      items.push({ PurchaseItemId: 0, IngredientId: gen.Id || gen.id, SizeId: null,
+        Quantity: 1, UnitCostNoTax: subtotal,
+        UnitCost: +(subtotal * (1 + ivaRate)).toFixed(2),
+        DiscountPercentage: 0, Total: subtotal });
+    }
+
     // Próximo número de orden (secuencial)
     let pn = '';
     try {
