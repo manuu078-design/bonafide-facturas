@@ -31,6 +31,8 @@ DATA_DIR   = pathlib.Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH") or
                           (pathlib.Path(__file__).parent / "data"))
 PHOTOS_DIR = DATA_DIR / "photos"
 INBOX_FILE = DATA_DIR / "inbox.json"
+PLANILLAS_FILE = DATA_DIR / "planillas.json"   # {locName: {locId, ts, items:[{id,name,unit}]}}
+CONTEOS_FILE = DATA_DIR / "conteos.json"       # [{id, loc, locId, by, ts, items:[{id,name,unit,qty}], status}]
 
 LOCATIONS = ["Palmas del Pilar", "Unicenter", "Leloir", "Obligado", "Juramento"]
 
@@ -51,6 +53,18 @@ def load_inbox():
 def save_inbox(items):
     _ensure_dirs()
     INBOX_FILE.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+
+
+def load_json(path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def save_json(path, obj):
+    _ensure_dirs()
+    path.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -208,6 +222,105 @@ EMPLOYEE_HTML = EMPLOYEE_HTML.replace(
     "\n      ".join(f'<option>{l}</option>' for l in LOCATIONS))
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Página de conteo de stock para empleados
+# ═══════════════════════════════════════════════════════════════════════
+COUNT_HTML = """<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Conteo de stock – Bonafide</title>
+<style>
+  *{box-sizing:border-box;font-family:-apple-system,'Segoe UI',Roboto,sans-serif}
+  body{margin:0;background:#f5f6f8;color:#222}
+  header{background:#1a1a2e;color:#e2c96e;padding:14px 20px;font-weight:700;font-size:18px}
+  main{max-width:560px;margin:0 auto;padding:16px}
+  .card{background:#fff;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.08);padding:16px;margin-bottom:14px}
+  label{display:block;font-weight:600;font-size:14px;margin:10px 0 6px}
+  select,input[type=text],input[type=search]{width:100%;padding:11px;border:1px solid #d5d8dc;border-radius:10px;font-size:16px}
+  .row{display:flex;align-items:center;gap:8px;padding:9px 4px;border-bottom:1px solid #f0f1f3}
+  .row .n{flex:1;font-size:14px}
+  .row .u{font-size:11px;color:#999;white-space:nowrap}
+  .row input{width:110px;padding:9px;border:1px solid #d5d8dc;border-radius:8px;font-size:16px;text-align:right}
+  .row input:not(:placeholder-shown){border-color:#28a745;background:#f2fff5}
+  .send{width:100%;padding:15px;margin-top:14px;border:none;border-radius:12px;background:#1a1a2e;color:#fff;font-size:17px;font-weight:700;cursor:pointer}
+  .send:disabled{opacity:.55}
+  #msg{margin-top:12px;padding:12px;border-radius:10px;font-size:15px;display:none}
+  #msg.ok{display:block;background:#d4edda;color:#155724}
+  #msg.err{display:block;background:#f8d7da;color:#721c24}
+  #prog{font-size:13px;color:#666;margin-top:8px}
+</style>
+</head>
+<body>
+<header>📋 Bonafide – Conteo de stock</header>
+<main>
+  <div class="card">
+    <label>Local</label>
+    <select id="loc"><option value="">— Elegí el local —</option></select>
+    <label>Tu nombre <span style="font-weight:400;color:#999">(opcional)</span></label>
+    <input type="text" id="who" placeholder="ej. Carla">
+  </div>
+  <div class="card" id="list-card" style="display:none">
+    <input type="search" id="q" placeholder="🔍 Buscar ingrediente...">
+    <div id="prog"></div>
+    <div id="items"></div>
+    <button class="send" id="send" onclick="send()">Enviar conteo</button>
+    <div id="msg"></div>
+  </div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let items=[];
+fetch('/api/planillas').then(r=>r.json()).then(ls=>{
+  $('loc').innerHTML='<option value="">— Elegí el local —</option>'+ls.map(l=>`<option>${l}</option>`).join('');
+  const s=localStorage.getItem('bf_cloc'); if(s) { $('loc').value=s; if($('loc').value===s) loadLoc(); }
+});
+$('loc').addEventListener('change',loadLoc);
+async function loadLoc(){
+  const loc=$('loc').value; if(!loc){$('list-card').style.display='none';return;}
+  localStorage.setItem('bf_cloc',loc);
+  const r=await fetch('/api/planilla?loc='+encodeURIComponent(loc));
+  if(!r.ok){alert('No hay planilla para ese local todavía. Pedile al encargado que abra el sistema.');return;}
+  const p=await r.json();
+  items=p.items||[];
+  items.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  $('items').innerHTML=items.map((it,i)=>`
+    <div class="row" data-n="${(it.name||'').toLowerCase()}">
+      <div class="n">${it.name}<div class="u">${it.unit||''}</div></div>
+      <input type="number" step="any" inputmode="decimal" id="it-${i}" placeholder="—" oninput="prog()">
+    </div>`).join('');
+  $('list-card').style.display='block'; prog();
+}
+$('q').addEventListener('input',()=>{
+  const q=$('q').value.toLowerCase();
+  document.querySelectorAll('.row').forEach(r=>{r.style.display=r.dataset.n.includes(q)?'flex':'none';});
+});
+function prog(){
+  const n=items.filter((_,i)=>$('it-'+i)&&$('it-'+i).value!=='').length;
+  $('prog').textContent=n+' de '+items.length+' contados (los vacíos no se envían)';
+}
+async function send(){
+  const filled=items.map((it,i)=>({...it,qty:$('it-'+i).value})).filter(x=>x.qty!=='');
+  const msg=$('msg'); msg.className='';
+  if(!filled.length){msg.className='err';msg.textContent='No cargaste ningún conteo.';return;}
+  if(!confirm('¿Enviar el conteo de '+filled.length+' ingredientes de '+$('loc').value+'?'))return;
+  const btn=$('send'); btn.disabled=true; btn.textContent='Enviando...';
+  try{
+    const r=await fetch('/api/conteo',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({loc:$('loc').value,by:$('who').value.trim(),
+        items:filled.map(x=>({id:x.id,name:x.name,unit:x.unit,qty:parseFloat(x.qty)}))})});
+    if(!r.ok)throw new Error('Error del servidor');
+    items.forEach((_,i)=>{$('it-'+i).value='';});
+    prog(); msg.className='ok'; msg.textContent='✅ Conteo enviado. ¡Gracias!';
+  }catch(e){msg.className='err';msg.textContent='❌ '+e.message;}
+  finally{btn.disabled=false;btn.textContent='Enviar conteo';}
+}
+</script>
+</body>
+</html>"""
+
+
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
@@ -221,6 +334,20 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_html()
         elif path in ("/cargar", "/cargar/"):
             self._send_bytes(EMPLOYEE_HTML.encode(), "text/html; charset=utf-8")
+        elif path in ("/conteo", "/conteo/"):
+            self._send_bytes(COUNT_HTML.encode(), "text/html; charset=utf-8")
+        elif path == "/api/planillas":
+            self._send_json(sorted(load_json(PLANILLAS_FILE, {}).keys()))
+        elif path == "/api/planilla":
+            params = dict(x.split("=", 1) for x in query.split("&") if "=" in x)
+            loc = urllib.parse.unquote_plus(params.get("loc", ""))
+            pl = load_json(PLANILLAS_FILE, {}).get(loc)
+            if pl:
+                self._send_json(pl)
+            else:
+                self._json_error(404, "Sin planilla para ese local")
+        elif path == "/api/conteos":
+            self._send_json(load_json(CONTEOS_FILE, []))
         elif path == "/api/inbox":
             self._api_inbox(query)
         elif path.startswith("/api/photo/"):
@@ -240,6 +367,12 @@ class Handler(BaseHTTPRequestHandler):
             self._api_upload()
         elif path == "/api/inbox/update":
             self._api_inbox_update()
+        elif path == "/api/planilla":
+            self._api_planilla_save()
+        elif path == "/api/conteo":
+            self._api_conteo_save()
+        elif path == "/api/conteo/update":
+            self._api_conteo_update()
         else:
             self.send_error(404)
 
@@ -350,6 +483,68 @@ class Handler(BaseHTTPRequestHandler):
             self._json_error(400, "Acción inválida")
             return
         save_inbox(items)
+        self._send_json({"ok": True})
+
+    # ── API: conteos de stock ────────────────────────────────────────────
+    def _api_planilla_save(self):
+        data = self._read_json()
+        if data is None:
+            return
+        loc = str(data.get("loc") or "").strip()
+        items = data.get("items") or []
+        if not loc or not items:
+            self._json_error(400, "Faltan datos")
+            return
+        pls = load_json(PLANILLAS_FILE, {})
+        pls[loc] = {"locId": data.get("locId"), "ts": time.strftime("%d/%m/%Y %H:%M"),
+                    "items": [{"id": i.get("id"), "name": str(i.get("name") or "")[:80],
+                               "unit": str(i.get("unit") or "")[:20]} for i in items[:400]]}
+        save_json(PLANILLAS_FILE, pls)
+        self._send_json({"ok": True})
+
+    def _api_conteo_save(self):
+        data = self._read_json()
+        if data is None:
+            return
+        loc = str(data.get("loc") or "").strip()
+        items = data.get("items") or []
+        if not loc or not items:
+            self._json_error(400, "Faltan datos")
+            return
+        pls = load_json(PLANILLAS_FILE, {})
+        loc_id = (pls.get(loc) or {}).get("locId")
+        cts = load_json(CONTEOS_FILE, [])
+        cts.insert(0, {
+            "id": uuid.uuid4().hex[:12], "loc": loc, "locId": loc_id,
+            "by": str(data.get("by") or "")[:60],
+            "ts": time.strftime("%d/%m/%Y %H:%M"),
+            "items": [{"id": i.get("id"), "name": str(i.get("name") or "")[:80],
+                       "unit": str(i.get("unit") or "")[:20], "qty": i.get("qty")}
+                      for i in items[:400]],
+            "status": "new",
+        })
+        save_json(CONTEOS_FILE, cts[:50])
+        self._send_json({"ok": True})
+
+    def _api_conteo_update(self):
+        data = self._read_json()
+        if data is None:
+            return
+        cid = data.get("id")
+        action = data.get("action")
+        cts = load_json(CONTEOS_FILE, [])
+        item = next((x for x in cts if x["id"] == cid), None)
+        if not item:
+            self._json_error(404, "No existe")
+            return
+        if action == "processed":
+            item["status"] = "processed"
+        elif action == "delete":
+            cts = [x for x in cts if x["id"] != cid]
+        else:
+            self._json_error(400, "Acción inválida")
+            return
+        save_json(CONTEOS_FILE, cts)
         self._send_json({"ok": True})
 
     # ── Serve local HTML ─────────────────────────────────────────────────

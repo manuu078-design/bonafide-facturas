@@ -74,7 +74,19 @@
   </div>
   <div id="invoice-stats" class="row g-3 mb-4"></div>
   <div id="inbox-container" class="mb-4"></div>
+  <div id="conteos-container" class="mb-4"></div>
   <div id="invoice-list-container"></div>
+</div>
+
+<!-- ═══ CONTEO DE STOCK (detalle) ══════════════════════════════════════════ -->
+<div id="page-conteo" class="page">
+  <div class="d-flex align-items-center gap-2 mb-4">
+    <button class="btn btn-sm btn-outline-secondary" onclick="showPage('dashboard')">
+      <i class="bi bi-arrow-left"></i>
+    </button>
+    <h4 class="mb-0 fw-bold" id="conteo-title">Conteo de stock</h4>
+  </div>
+  <div id="conteo-body"><div class="text-muted">Cargando...</div></div>
 </div>
 
 <!-- ═══ PROVEEDORES ════════════════════════════════════════════════════════ -->
@@ -1966,6 +1978,176 @@ function renderReviewPhotos(inv) {
     </div></div>`;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// CONTEOS DE STOCK (relevamiento semanal de la empleada, desde /conteo)
+// ═══════════════════════════════════════════════════════════════════════
+let conteosCache = [];
+let currentConteoId = null;
+
+// Publica en el servidor la lista de ingredientes de cada local (para /conteo)
+async function pushPlanillas() {
+  if (!IS_PROXIED || window.__planPushed) return;
+  window.__planPushed = true;
+  for (const loc of state.locations.filter(l => l.email)) {
+    try {
+      const jwt = await getValidJwt(loc);
+      const ings = await getIngredients(jwt, loc.id);
+      await fetch('/api/planilla', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ loc: loc.name, locId: loc.id,
+          items: ings.filter(i => i.IsActive !== false)
+                     .map(i => ({ id: i.Id||i.id, name: i.Name||i.name, unit: i.MeasurementUnitName||'' })) }) });
+    } catch(e) {}
+  }
+}
+
+async function loadConteos() {
+  const box = document.getElementById('conteos-container');
+  if (!box || !IS_PROXIED) return;
+  try {
+    const r = await fetch('/api/conteos');
+    conteosCache = await r.json();
+    renderConteos();
+  } catch(e) { box.innerHTML = ''; }
+}
+
+function renderConteos() {
+  const box = document.getElementById('conteos-container');
+  if (!box) return;
+  const items = conteosCache.filter(c => c.status === 'new');
+  if (!items.length) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="card border-success">
+    <div class="card-header py-3 d-flex justify-content-between align-items-center" style="background:#e8f7ee">
+      <h6 class="mb-0 fw-bold"><i class="bi bi-clipboard-check-fill me-2 text-success"></i>
+        Conteos de stock recibidos <span class="badge bg-success ms-1">${items.length}</span></h6>
+      <button class="btn btn-sm btn-link p-0" onclick="loadConteos()"><i class="bi bi-arrow-clockwise"></i> Actualizar</button>
+    </div>
+    <div class="card-body py-2">
+      ${items.map(c => `
+        <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+          <div>
+            <span class="fw-semibold">${esc(c.loc)}</span>
+            <span class="small text-muted ms-2">${esc(c.ts)}${c.by ? ' · '+esc(c.by) : ''} · ${c.items.length} ingredientes</span>
+          </div>
+          <div class="text-nowrap">
+            <button class="btn btn-sm btn-success" onclick="openConteo('${c.id}')"><i class="bi bi-search me-1"></i>Revisar diferencias</button>
+            <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteConteo('${c.id}')"><i class="bi bi-trash3"></i></button>
+          </div>
+        </div>`).join('')}
+    </div></div>`;
+}
+
+async function deleteConteo(id) {
+  if (!confirm('¿Descartar este conteo sin aplicarlo?')) return;
+  await fetch('/api/conteo/update', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ id, action: 'delete' }) });
+  conteosCache = conteosCache.filter(x => x.id !== id);
+  renderConteos();
+}
+
+function openConteo(id) { currentConteoId = id; showPage('conteo'); }
+
+async function renderConteoDetail() {
+  const c = conteosCache.find(x => x.id === currentConteoId);
+  const body = document.getElementById('conteo-body');
+  if (!c) { body.innerHTML = '<div class="text-muted">Conteo no encontrado.</div>'; return; }
+  document.getElementById('conteo-title').textContent = `Conteo ${c.loc} — ${c.ts}${c.by ? ' ('+c.by+')' : ''}`;
+  const loc = state.locations.find(l => l.id === c.locId) ||
+              state.locations.find(l => normName(l.name) === normName(c.loc));
+  if (!loc || !loc.email) {
+    body.innerHTML = '<div class="alert alert-warning">Este local no tiene credenciales de Nucleo en Configuración — no puedo comparar contra el sistema.</div>';
+    return;
+  }
+  body.innerHTML = '<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Leyendo stock del sistema...</div>';
+  try {
+    const jwt = await getValidJwt(loc);
+    const r = await nucleoReq('GET','IngredientStockFlow/FindIngredientsInWarehouse/?WarehouseId=1',null,jwt);
+    const byId = {};
+    ((r.data && r.data.Ingredients) || []).forEach(i => { byId[i.IngredientId] = i; });
+    const rows = c.items.filter(it => it.qty !== null && it.qty !== undefined).map(it => {
+      const sys = byId[it.id] ? byId[it.id].Stock : null;
+      const dif = sys === null ? null : +(it.qty - sys).toFixed(2);
+      return { ...it, sys, dif };
+    });
+    const conDif = rows.filter(x => x.dif !== null && Math.abs(x.dif) > 0.005);
+    window.__conteoRows = rows;
+    const fmtN = v => v === null ? '—' : (+v).toLocaleString('es-AR');
+    body.innerHTML = `
+      <div class="row g-3 mb-3">
+        <div class="col-4"><div class="card p-3 text-center"><div class="fs-3 fw-bold">${rows.length}</div><div class="small text-muted">Contados</div></div></div>
+        <div class="col-4"><div class="card p-3 text-center"><div class="fs-3 fw-bold ${conDif.length?'text-danger':'text-success'}">${conDif.length}</div><div class="small text-muted">Con diferencia</div></div></div>
+        <div class="col-4"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-success">${rows.length - conDif.length}</div><div class="small text-muted">Coinciden</div></div></div>
+      </div>
+      <div class="card mb-3"><div class="card-body p-0"><table class="table table-sm table-hover mb-0">
+        <thead class="table-light"><tr>
+          <th class="ps-3">Ingrediente</th><th>Unidad</th>
+          <th class="text-end">Sistema</th><th class="text-end">Contado</th><th class="text-end pe-3">Diferencia</th>
+        </tr></thead>
+        <tbody>
+          ${rows.sort((a,b)=>Math.abs(b.dif||0)-Math.abs(a.dif||0)).map(x => `<tr class="${x.dif!==null&&Math.abs(x.dif)>0.005?'table-warning':''}">
+            <td class="ps-3">${esc(x.name)}</td>
+            <td class="small text-muted">${esc(x.unit||'')}</td>
+            <td class="text-end">${fmtN(x.sys)}</td>
+            <td class="text-end fw-semibold">${fmtN(x.qty)}</td>
+            <td class="text-end pe-3 fw-bold ${x.dif===null?'text-muted':x.dif<0?'text-danger':x.dif>0?'text-primary':'text-success'}">
+              ${x.dif===null?'sin sistema':(x.dif>0?'+':'')+fmtN(x.dif)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table></div></div>
+      <div class="d-flex gap-2">
+        <button class="btn text-white" style="background:#1a1a2e" onclick="applyConteo()">
+          <i class="bi bi-check2-circle me-1"></i>Aplicar ajustes a Nucleo (${conDif.length})</button>
+        <button class="btn btn-outline-secondary" onclick="markConteoDone()">Marcar revisado sin ajustar</button>
+      </div>
+      <p class="small text-muted mt-2">Diferencia negativa (rojo) = falta mercadería vs. el sistema (merma, error de carga o venta sin registrar).
+      Positiva (azul) = hay más de lo que dice el sistema. "Aplicar" deja el stock de Nucleo igual al conteo físico.</p>`;
+  } catch(e) {
+    body.innerHTML = `<div class="alert alert-danger">Error leyendo el sistema: ${esc(e.message)}</div>`;
+  }
+}
+
+async function applyConteo() {
+  const c = conteosCache.find(x => x.id === currentConteoId);
+  const rows = (window.__conteoRows || []).filter(x => x.dif !== null && Math.abs(x.dif) > 0.005);
+  if (!rows.length) { showToast('No hay diferencias para ajustar.', 'info'); markConteoDone(); return; }
+  if (!confirm(`¿Ajustar ${rows.length} ingredientes en Nucleo para que queden igual al conteo físico?`)) return;
+  const loc = state.locations.find(l => l.id === c.locId) ||
+              state.locations.find(l => normName(l.name) === normName(c.loc));
+  const btn = event.target; btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Ajustando...';
+  try {
+    const jwt = await getValidJwt(loc);
+    let ok = 0; const errs = [];
+    for (const x of rows) {
+      const body = { IngredientId: x.id, FromWarehouseId: 1,
+        Description: `Conteo físico ${c.ts}${c.by ? ' ('+c.by+')' : ''} — ajuste`,
+        ActionTypeId: 18, EntityTypeId: 23 };
+      if (x.dif > 0) body.Income = x.dif; else body.Outcome = -x.dif;
+      try {
+        const r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',body,jwt);
+        const vr = r.data && r.data.ValidationResult;
+        if (r.status === 200 && !(vr && vr.HasErrors)) ok++;
+        else errs.push(x.name);
+      } catch(e) { errs.push(x.name); }
+    }
+    await fetch('/api/conteo/update', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ id: c.id, action: 'processed' }) });
+    c.status = 'processed';
+    showToast(errs.length ? `⚠️ ${ok} ajustados, fallaron: ${errs.join(', ')}` : `✅ Stock ajustado: ${ok} ingredientes.`, errs.length?'warning':'success');
+    showPage('dashboard');
+  } catch(e) {
+    showToast('❌ ' + e.message, 'danger');
+    btn.disabled = false; btn.innerHTML = '<i class="bi bi-check2-circle me-1"></i>Aplicar ajustes a Nucleo';
+  }
+}
+
+async function markConteoDone() {
+  const c = conteosCache.find(x => x.id === currentConteoId);
+  await fetch('/api/conteo/update', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ id: c.id, action: 'processed' }) });
+  c.status = 'processed';
+  showPage('dashboard');
+}
+
 // ── Empresas ─────────────────────────────────────────────────────────────
 const COMPANIES = [
   { name: 'UN CORTADO SA',  locs: ['palmas','unicenter','leloir'] },
@@ -2164,6 +2346,8 @@ function renderDashboard() {
   const warn = document.getElementById('no-locations-warn');
   warn.classList.toggle('d-none', state.locations.length > 0);
   loadInbox();
+  loadConteos();
+  pushPlanillas();
 
   // Agrupar por empresa
   const groups = {};
@@ -2305,6 +2489,7 @@ function showPage(name, param) {
   if (name === 'dashboard') renderDashboard();
   if (name === 'suppliers') renderSuppliers();
   if (name === 'supplier') renderSupplierDetail(currentSupplier);
+  if (name === 'conteo') renderConteoDetail();
   if (name === 'settings') {
     renderSettings();
     populateLocationDropdowns();
