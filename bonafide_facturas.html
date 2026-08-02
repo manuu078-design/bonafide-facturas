@@ -1363,9 +1363,13 @@ async function createPurchaseOrder(invId) {
       pn = String((nums.length ? Math.max(...nums) : 0) + 1);
     } catch(e) {}
 
+    // La orden lleva la FECHA DE LA FACTURA (no la de hoy), para que el
+    // análisis mensual de compras y los vencimientos queden en el mes correcto.
     const now = new Date();
+    const fInv = parseARDate(inv.date);
+    const opDate = fInv ? new Date(fInv.getFullYear(), fInv.getMonth(), fInv.getDate(), 12, 0, 0) : now;
     const body = {
-      Id: 0, Date: now.toISOString(), Hour: now.getHours(), Minute: now.getMinutes(),
+      Id: 0, Date: opDate.toISOString(), Hour: fInv ? 12 : now.getHours(), Minute: fInv ? 0 : now.getMinutes(),
       Subtotal: subtotal, DiscountPercentage: 0, Discount: 0,
       Subtotal2: subtotal, Tax: tax, Subtotal3: subtotal,
       PercepcionGanancia: 0, PercepcionIVA: percep, PercepcionIIBB: 0,
