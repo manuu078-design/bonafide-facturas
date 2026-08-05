@@ -2050,6 +2050,57 @@ async function deleteConteo(id) {
 
 function openConteo(id) { currentConteoId = id; showPage('conteo'); }
 
+// Consumo por ingrediente (ventas × recetas) desde una fecha/hora hasta ahora
+async function consumoDesde(loc, jwt, countedAtLocal) {
+  const d = new Date(countedAtLocal);
+  if (isNaN(d.getTime())) return {};
+  const sd = encodeURIComponent(d.toUTCString());
+  const ed = encodeURIComponent(new Date(Date.now() + 60000).toUTCString());
+  const s = await nucleoReq('GET', `Stats/GetSalesByProductStats/?StartDate=${sd}&EndDate=${ed}&UseTimeRange=false&HourFrom=0&MinuteFrom=0&HourTo=23&MinuteTo=59&DateGrouping=0&OnlyProductsSendUnitAlax=false&IsBreakDownPromotions=false`, null, jwt);
+  const items = (s.data && s.data.Items) || [];
+  // recetas del local (con caché en memoria: la primera vez tarda ~1 min)
+  if (!window.__recCache) window.__recCache = {};
+  let rec = window.__recCache[loc.id];
+  if (!rec) {
+    rec = {};
+    const prods = await nucleoReq('GET','Product/Find/',null,jwt);
+    const list = prods.data || [];
+    for (let i = 0; i < list.length; i++) {
+      try {
+        const dd = await nucleoReq('GET','Product/FindById/'+list[i].Id,null,jwt);
+        rec[(list[i].Name||'').trim().toLowerCase()] =
+          ((dd.data && dd.data.ProductIngredientItems) || []).map(g => ({ id: g.IngredientId, q: g.Quantity }));
+      } catch(e) {}
+      const el = document.getElementById('conteo-progress');
+      if (el) el.textContent = `Leyendo recetas ${i+1}/${list.length}...`;
+    }
+    window.__recCache[loc.id] = rec;
+  }
+  const cons = {};
+  for (const it of items) {
+    for (const g of (rec[(it.Name||'').trim().toLowerCase()] || [])) {
+      cons[g.id] = (cons[g.id] || 0) + it.Quantity * g.q;
+    }
+  }
+  return cons;
+}
+
+// Movimiento de ajuste con reintento entero (ingredientes no fraccionables)
+async function movAjuste(jwt, ingId, delta, desc) {
+  const mk = v => { const b = { IngredientId: ingId, FromWarehouseId: 1, Description: desc,
+    ActionTypeId: 18, EntityTypeId: 23 }; if (v > 0) b.Income = v; else b.Outcome = -v; return b; };
+  let r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement', mk(delta), jwt);
+  let vr = r.data && r.data.ValidationResult;
+  if (r.status === 200 && vr && vr.HasErrors && /entera/i.test((vr.ErrorMessages||[]).join(' '))) {
+    const d2 = Math.round(delta);
+    if (d2 === 0) return { ok: true };
+    r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement', mk(d2), jwt);
+    vr = r.data && r.data.ValidationResult;
+  }
+  return { ok: r.status === 200 && !(vr && vr.HasErrors),
+           err: vr && vr.ErrorMessages && vr.ErrorMessages.join(',') };
+}
+
 async function renderConteoDetail() {
   const c = conteosCache.find(x => x.id === currentConteoId);
   const body = document.getElementById('conteo-body');
@@ -2061,16 +2112,23 @@ async function renderConteoDetail() {
     body.innerHTML = '<div class="alert alert-warning">Este local no tiene credenciales de Nucleo en Configuración — no puedo comparar contra el sistema.</div>';
     return;
   }
-  body.innerHTML = '<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Leyendo stock del sistema...</div>';
+  body.innerHTML = '<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Leyendo stock del sistema... <span id="conteo-progress"></span></div>';
   try {
     const jwt = await getValidJwt(loc);
     const r = await nucleoReq('GET','IngredientStockFlow/FindIngredientsInWarehouse/?WarehouseId=1',null,jwt);
     const byId = {};
     ((r.data && r.data.Ingredients) || []).forEach(i => { byId[i.IngredientId] = i; });
+    // Si el conteo tiene fecha/hora: descontar lo vendido desde ese momento
+    let consDesde = {};
+    if (c.countedAt) {
+      try { consDesde = await consumoDesde(loc, jwt, c.countedAt); } catch(e) {}
+    }
     const rows = c.items.filter(it => it.qty !== null && it.qty !== undefined).map(it => {
       const sys = byId[it.id] ? byId[it.id].Stock : null;
-      const dif = sys === null ? null : +(it.qty - sys).toFixed(2);
-      return { ...it, sys, dif };
+      const vendido = +(consDesde[it.id] || 0).toFixed(2);
+      const target = +(it.qty - vendido).toFixed(2);   // contado ajustado a AHORA
+      const dif = sys === null ? null : +(target - sys).toFixed(2);
+      return { ...it, sys, vendido, target, dif };
     });
     const conDif = rows.filter(x => x.dif !== null && Math.abs(x.dif) > 0.005);
     window.__conteoRows = rows;
@@ -2081,10 +2139,13 @@ async function renderConteoDetail() {
         <div class="col-4"><div class="card p-3 text-center"><div class="fs-3 fw-bold ${conDif.length?'text-danger':'text-success'}">${conDif.length}</div><div class="small text-muted">Con diferencia</div></div></div>
         <div class="col-4"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-success">${rows.length - conDif.length}</div><div class="small text-muted">Coinciden</div></div></div>
       </div>
+      ${c.countedAt ? `<p class="small text-muted mb-2"><i class="bi bi-clock me-1"></i>Conteo hecho el <strong>${esc(c.countedAt.replace('T',' '))}</strong>: a lo contado se le descuenta lo vendido desde esa hora hasta ahora, y ESO se compara contra el sistema.</p>` : ''}
       <div class="card mb-3"><div class="card-body p-0"><table class="table table-sm table-hover mb-0">
         <thead class="table-light"><tr>
           <th class="ps-3">Ingrediente</th><th>Unidad</th>
-          <th class="text-end">Sistema</th><th class="text-end">Contado</th><th class="text-end pe-3">Diferencia</th>
+          <th class="text-end">Sistema</th><th class="text-end">Contado</th>
+          ${c.countedAt ? '<th class="text-end">Vendido desde</th><th class="text-end">Ajustado a hoy</th>' : ''}
+          <th class="text-end pe-3">Diferencia</th>
         </tr></thead>
         <tbody>
           ${rows.sort((a,b)=>Math.abs(b.dif||0)-Math.abs(a.dif||0)).map(x => `<tr class="${x.dif!==null&&Math.abs(x.dif)>0.005?'table-warning':''}">
@@ -2092,6 +2153,7 @@ async function renderConteoDetail() {
             <td class="small text-muted">${esc(x.unit||'')}</td>
             <td class="text-end">${fmtN(x.sys)}</td>
             <td class="text-end fw-semibold">${fmtN(x.qty)}</td>
+            ${c.countedAt ? `<td class="text-end text-muted">${x.vendido?'−'+fmtN(x.vendido):'—'}</td><td class="text-end fw-semibold">${fmtN(x.target)}</td>` : ''}
             <td class="text-end pe-3 fw-bold ${x.dif===null?'text-muted':x.dif<0?'text-danger':x.dif>0?'text-primary':'text-success'}">
               ${x.dif===null?'sin sistema':(x.dif>0?'+':'')+fmtN(x.dif)}</td>
           </tr>`).join('')}
@@ -2122,15 +2184,10 @@ async function applyConteo() {
     const jwt = await getValidJwt(loc);
     let ok = 0; const errs = [];
     for (const x of rows) {
-      const body = { IngredientId: x.id, FromWarehouseId: 1,
-        Description: `Conteo físico ${c.ts}${c.by ? ' ('+c.by+')' : ''} — ajuste`,
-        ActionTypeId: 18, EntityTypeId: 23 };
-      if (x.dif > 0) body.Income = x.dif; else body.Outcome = -x.dif;
       try {
-        const r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',body,jwt);
-        const vr = r.data && r.data.ValidationResult;
-        if (r.status === 200 && !(vr && vr.HasErrors)) ok++;
-        else errs.push(x.name);
+        const res = await movAjuste(jwt, x.id, x.dif,
+          `Conteo físico ${c.countedAt ? c.countedAt.replace('T',' ') : c.ts}${c.by ? ' ('+c.by+')' : ''} — ajuste`);
+        if (res.ok) ok++; else errs.push(x.name);
       } catch(e) { errs.push(x.name); }
     }
     await fetch('/api/conteo/update', { method:'POST', headers:{'Content-Type':'application/json'},

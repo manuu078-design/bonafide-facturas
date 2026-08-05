@@ -260,6 +260,9 @@ COUNT_HTML = """<!DOCTYPE html>
     <select id="loc"><option value="">— Elegí el local —</option></select>
     <label>Tu nombre <span style="font-weight:400;color:#999">(opcional)</span></label>
     <input type="text" id="who" placeholder="ej. Carla">
+    <label>Fecha y hora del conteo</label>
+    <input type="datetime-local" id="when" style="width:100%;padding:11px;border:1px solid #d5d8dc;border-radius:10px;font-size:16px">
+    <p style="font-size:12px;color:#888;margin:4px 0 0">El sistema descuenta solo lo vendido después de esta hora.</p>
   </div>
   <div class="card" id="list-card" style="display:none">
     <input type="search" id="q" placeholder="🔍 Buscar ingrediente...">
@@ -272,6 +275,7 @@ COUNT_HTML = """<!DOCTYPE html>
 <script>
 const $=id=>document.getElementById(id);
 let items=[];
+(function(){const n=new Date();n.setMinutes(n.getMinutes()-n.getTimezoneOffset());$('when').value=n.toISOString().slice(0,16);})();
 fetch('/api/planillas').then(r=>r.json()).then(ls=>{
   $('loc').innerHTML='<option value="">— Elegí el local —</option>'+ls.map(l=>`<option>${l}</option>`).join('');
   const s=localStorage.getItem('bf_cloc'); if(s) { $('loc').value=s; if($('loc').value===s) loadLoc(); }
@@ -308,7 +312,7 @@ async function send(){
   const btn=$('send'); btn.disabled=true; btn.textContent='Enviando...';
   try{
     const r=await fetch('/api/conteo',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({loc:$('loc').value,by:$('who').value.trim(),
+      body:JSON.stringify({loc:$('loc').value,by:$('who').value.trim(),countedAt:$('when').value,
         items:filled.map(x=>({id:x.id,name:x.name,unit:x.unit,qty:parseFloat(x.qty)}))})});
     if(!r.ok)throw new Error('Error del servidor');
     items.forEach((_,i)=>{$('it-'+i).value='';});
@@ -518,6 +522,7 @@ class Handler(BaseHTTPRequestHandler):
             "id": uuid.uuid4().hex[:12], "loc": loc, "locId": loc_id,
             "by": str(data.get("by") or "")[:60],
             "ts": time.strftime("%d/%m/%Y %H:%M"),
+            "countedAt": str(data.get("countedAt") or "")[:20],
             "items": [{"id": i.get("id"), "name": str(i.get("name") or "")[:80],
                        "unit": str(i.get("unit") or "")[:20], "qty": i.get("qty")}
                       for i in items[:400]],
