@@ -1941,8 +1941,11 @@ async function aiReadInvoice(sources, onProgress) {
   const data = await r.json();
   let txt = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
   const j = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+  let fecha = String(j.date || '');
+  const dm = fecha.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (dm) fecha = dm[3] + '/' + dm[2] + '/' + dm[1];
   return {
-    supplier: j.supplier || '', number: j.number || '', date: j.date || '',
+    supplier: j.supplier || '', number: j.number || '', date: fecha,
     subtotal: +j.subtotal || 0, iva: +j.iva || 0, total: +j.total || 0,
     items: (j.items || []).map(it => ({
       code: String(it.code || '').trim(), description: it.description || '',
