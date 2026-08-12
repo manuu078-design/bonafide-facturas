@@ -303,6 +303,21 @@
           </div>
         </div>
       </div>
+
+      <!-- IA para lectura de fotos -->
+      <div class="card mt-3">
+        <div class="card-header bg-transparent py-3">
+          <h6 class="mb-0 fw-bold text-muted"><i class="bi bi-stars me-2"></i>Lectura de fotos con IA</h6>
+        </div>
+        <div class="card-body">
+          <p class="small text-muted mb-2">Con una clave API de Anthropic (se crea en console.anthropic.com), las fotos de facturas se leen con IA en vez del OCR gratuito. Mucho más preciso. La clave queda guardada solo en este navegador.</p>
+          <div class="input-group">
+            <input type="password" id="anthropic-key" class="form-control" placeholder="sk-ant-...">
+            <button class="btn btn-primary" onclick="saveAnthropicKey()">Guardar</button>
+          </div>
+          <div id="anthropic-key-status" class="small mt-2"></div>
+        </div>
+      </div>
     </div>
     <div class="col-lg-4">
       <div class="card mb-3">
@@ -927,6 +942,16 @@ async function processUpload() {
       rawText = await extractPDF(uploadedFile);
       const parsed = parseInvoiceText(rawText);
       meta = { ...parsed, supplier: supplier || parsed.supplier };
+    } else if ((state.anthropicKey || '').trim()) {
+      try {
+        const parsed = await aiReadInvoice([uploadedFile], t => { btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>' + t; });
+        meta = { ...parsed, supplier: supplier || parsed.supplier };
+        rawText = '(Leído con IA)\n' + JSON.stringify(parsed, null, 2);
+      } catch (e) {
+        showToast('Falló la lectura con IA: ' + e.message, 'warning');
+        rawText = '(Imagen: datos extraídos manualmente)';
+        meta.supplier = supplier || '';
+      }
     } else {
       rawText = '(Imagen: datos extraídos manualmente)';
       meta.supplier = supplier || '';
@@ -1869,6 +1894,64 @@ function loadScript(src) {
   });
 }
 
+// ── Lectura de fotos con IA (Claude) ─────────────────────────────────────
+function saveAnthropicKey() {
+  const v = (document.getElementById('anthropic-key').value || '').trim();
+  state.anthropicKey = v;
+  saveState();
+  renderAnthropicKeyStatus();
+  showToast(v ? 'Clave guardada. Las fotos ahora se leen con IA.' : 'Clave borrada. Se usará el OCR gratuito.');
+}
+
+function renderAnthropicKeyStatus() {
+  const el = document.getElementById('anthropic-key-status');
+  if (!el) return;
+  el.innerHTML = (state.anthropicKey || '').trim()
+    ? '<span class="text-success"><i class="bi bi-check-circle me-1"></i>IA activada (clave ···' + esc(state.anthropicKey.slice(-4)) + ')</span>'
+    : '<span class="text-muted">Sin clave — se usa el OCR gratuito.</span>';
+}
+
+async function toJpegBase64(src) {
+  let url = src, revoke = null;
+  if (src instanceof Blob) { url = URL.createObjectURL(src); revoke = url; }
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+  if (revoke) URL.revokeObjectURL(revoke);
+  const scale = Math.min(1, 1800 / Math.max(img.width, img.height, 1));
+  const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  cv.getContext('2d').drawImage(img, 0, 0, w, h);
+  return cv.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
+async function aiReadInvoice(sources, onProgress) {
+  const key = (state.anthropicKey || '').trim();
+  if (!key) throw new Error('Sin clave API');
+  onProgress('Preparando fotos...');
+  const images = [];
+  for (const s of sources) images.push(await toJpegBase64(s));
+  onProgress('Leyendo con IA...');
+  const content = images.map(d => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: d } }));
+  content.push({ type: 'text', text: 'Sos un lector de facturas y remitos argentinos. Extraé los datos y devolvé SOLO un JSON válido, sin texto extra ni markdown, con esta forma exacta: {"supplier":"","number":"","date":"YYYY-MM-DD","subtotal":0,"iva":0,"total":0,"items":[{"code":"","description":"","quantity":0,"unit":"","unitPrice":0,"amount":0}]}. Reglas: números como números con punto decimal (ojo: en Argentina 1.234,56 significa 1234.56). "quantity" es la cantidad de bultos/unidades entregadas. "code" es el código de artículo si figura (si no, ""). "unit" es la unidad (CAJ, BOL, UN, KG...). "amount" es el importe del renglón. Si un dato no figura dejalo vacío o en 0. Incluí TODOS los renglones de artículos, no te saltees ninguno.' });
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: 'claude-haiku-4-5', max_tokens: 8000, messages: [{ role: 'user', content }] })
+  });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e?.error?.message || ('HTTP ' + r.status)); }
+  const data = await r.json();
+  let txt = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  const j = JSON.parse(txt.slice(txt.indexOf('{'), txt.lastIndexOf('}') + 1));
+  return {
+    supplier: j.supplier || '', number: j.number || '', date: j.date || '',
+    subtotal: +j.subtotal || 0, iva: +j.iva || 0, total: +j.total || 0,
+    items: (j.items || []).map(it => ({
+      code: String(it.code || '').trim(), description: it.description || '',
+      quantity: +it.quantity || 0, unit: it.unit || '', unitPrice: +it.unitPrice || 0,
+      amount: +it.amount || 0, ingId: null, ingName: ''
+    })).filter(it => it.description || it.code)
+  };
+}
+
 // OCR de fotos con Tesseract.js (español) — corre en el navegador.
 // Preprocesa la imagen (agrandar + escala de grises + contraste) para leer mejor.
 async function preprocessForOCR(url) {
@@ -1953,10 +2036,20 @@ async function processInboxItem(itemId) {
       }
     }
     const imgs = urls.filter(u => !u.includes('.pdf'));
-    if (imgs.length) rawText += await ocrPhotos(imgs, setP);
-
-    setP('Armando factura...');
-    const parsed = parseInvoiceText(rawText);
+    let parsed = null;
+    if (imgs.length && (state.anthropicKey || '').trim()) {
+      try {
+        parsed = await aiReadInvoice(imgs, setP);
+        rawText += '(Leído con IA)\n' + JSON.stringify(parsed, null, 2);
+      } catch (e) {
+        showToast('Falló la lectura con IA (' + e.message + ') — uso el OCR gratuito.', 'warning');
+      }
+    }
+    if (!parsed) {
+      if (imgs.length) rawText += await ocrPhotos(imgs, setP);
+      setP('Armando factura...');
+      parsed = parseInvoiceText(rawText);
+    }
     const invLocId = matchLocByName(it.loc);
     const inv = {
       id: state.nextId++,
@@ -2677,6 +2770,7 @@ function showPage(name, param) {
   if (name === 'settings') {
     renderSettings();
     populateLocationDropdowns();
+    renderAnthropicKeyStatus();
   }
   if (name === 'upload') populateLocationDropdowns();
   if (name === 'review' && param) renderReview(param);
