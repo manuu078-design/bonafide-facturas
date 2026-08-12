@@ -134,7 +134,8 @@
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">Proveedor <span class="text-muted fw-normal small">(opcional)</span></label>
-            <input type="text" id="upload-supplier" class="form-control" placeholder="ej. Bonafide">
+            <select id="upload-supplier" class="form-select"></select>
+            <input type="text" id="upload-supplier-other" class="form-control mt-2 d-none" placeholder="Nombre del proveedor">
           </div>
           <div class="mb-3">
             <div id="dropzone" class="text-center p-4" onclick="document.getElementById('file-input').click()">
@@ -910,7 +911,7 @@ function clearFile() {
 
 async function processUpload() {
   const locId = parseInt(document.getElementById('upload-location').value);
-  const supplier = document.getElementById('upload-supplier').value.trim();
+  const supplier = getUploadSupplier();
   if (!locId) { showToast('Seleccioná un local.', 'warning'); return; }
   if (!uploadedFile) { showToast('Seleccioná un archivo.', 'warning'); return; }
 
@@ -2673,7 +2674,6 @@ function showPage(name, param) {
   if (name === 'supplier') renderSupplierDetail(currentSupplier);
   if (name === 'conteo') renderConteoDetail();
   if (name === 'stock') renderStockPage();
-  if (name === 'stock') renderStockPage();
   if (name === 'settings') {
     renderSettings();
     populateLocationDropdowns();
@@ -2686,9 +2686,47 @@ function populateLocationDropdowns() {
   ['upload-location'].forEach(id => {
     const sel = document.getElementById(id);
     if (!sel) return;
+    const prev = sel.value;
     sel.innerHTML = '<option value="">— Seleccioná el local —</option>' +
       state.locations.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('');
+    if (prev) sel.value = prev;
+    if (!sel.dataset.supHook) { sel.dataset.supHook = '1'; sel.addEventListener('change', populateSupplierDropdown); }
   });
+  populateSupplierDropdown();
+}
+
+function getUploadSupplier() {
+  const sel = document.getElementById('upload-supplier');
+  if (!sel) return '';
+  if (sel.value === '__otro__') return (document.getElementById('upload-supplier-other').value || '').trim();
+  return (sel.value || '').trim();
+}
+
+function populateSupplierDropdown() {
+  const sel = document.getElementById('upload-supplier');
+  if (!sel) return;
+  const locId = parseInt(document.getElementById('upload-location')?.value) || null;
+  const names = {};
+  (state.invoices || []).forEach(inv => {
+    if (locId && inv.locId !== locId) return;
+    const n = (inv.supplier || '').trim();
+    if (n) names[normName(n)] = n;
+  });
+  if (!locId || !Object.keys(names).length) {
+    KNOWN_SUPPLIERS.forEach(([re, n]) => { if (!names[normName(n)]) names[normName(n)] = n; });
+  }
+  const list = Object.values(names).sort((a, b) => a.localeCompare(b, 'es'));
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— Detectar del PDF —</option>' +
+    list.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('') +
+    '<option value="__otro__">Otro…</option>';
+  if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+  const toggleOther = () => {
+    const o = document.getElementById('upload-supplier-other');
+    if (o) o.classList.toggle('d-none', sel.value !== '__otro__');
+  };
+  toggleOther();
+  if (!sel.dataset.otherHook) { sel.dataset.otherHook = '1'; sel.addEventListener('change', toggleOther); }
 }
 
 function showToast(msg, type='success') {
