@@ -2267,23 +2267,10 @@ async function loadStockTable(locId) {
   }
 }
 
-function setNextDelivery(locId, val) {
-  state.nextDelivery = state.nextDelivery || {};
-  state.nextDelivery[locId] = val;
-  saveState();
-  renderStockRows();
-}
-
 function renderStockRows() {
   const { locId, rows } = window.__stockCache || {};
   if (!rows) return;
   const body = document.getElementById('stock-body');
-  const fecha = (state.nextDelivery || {})[locId] || '';
-  let daysTo = 0;
-  if (fecha) {
-    const t = new Date(fecha + 'T12:00:00');
-    daysTo = Math.max(0, Math.ceil((t.getTime() - Date.now()) / 86400000));
-  }
   const nRojo = rows.filter(x => x.d !== null && x.d < 7).length;
   const nAmar = rows.filter(x => x.d !== null && x.d >= 7 && x.d < 15).length;
   const fmtS = x => x.u.toLowerCase().startsWith('gramo')
@@ -2302,22 +2289,19 @@ function renderStockRows() {
     };
   const colch = x => {
     if (x.d === null) return '<span class="small text-muted">—</span>';
-    const dEff = x.d - daysTo;
-    const pct = Math.max(0, Math.min(100, Math.round(dEff / 7 * 100)));
-    const col = pct >= 100 ? 'bg-success' : pct >= 50 ? 'bg-warning' : 'bg-danger';
-    return `<div class="progress" style="height:15px;min-width:80px" title="Sobran ${Math.max(0,Math.round(dEff*10)/10)} días después de la próxima entrega — ${pct}% del colchón de 7 días">
-      <div class="progress-bar ${col}" style="width:${pct}%">${pct}%</div></div>`;
+    const libres = x.d - 7;
+    const pct = Math.max(0, Math.min(100, Math.round(libres / 15 * 100)));
+    const col = libres <= 0 ? 'bg-danger' : pct < 33 ? 'bg-warning' : 'bg-success';
+    const tip = libres > 0
+      ? `${Math.round(libres*10)/10} días de mercadería antes de tocar el colchón de 7 (100% = 15 días libres)`
+      : `Ya se está consumiendo el colchón de seguridad: quedan ${Math.max(0,Math.round(x.d*10)/10)} días de stock`;
+    return `<div class="d-flex align-items-center gap-1 justify-content-end" style="min-width:110px" title="${tip}">
+      <div class="progress flex-grow-1" style="height:13px;max-width:80px"><div class="progress-bar ${col}" style="width:${Math.max(pct,3)}%"></div></div>
+      <span class="small ${libres<=0?'text-danger fw-bold':'text-muted'}" style="min-width:32px">${pct}%</span></div>`;
   };
   const conDias = rows.filter(x => x.d !== null);
-  const nColch = conDias.filter(x => x.d - daysTo >= 7).length;
+  const nColch = conDias.filter(x => x.d >= 7).length;
   body.innerHTML = `
-      <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
-        <label class="small fw-semibold mb-0">Próxima entrega Bonafide:</label>
-        <input type="date" class="form-control form-control-sm" style="width:auto" value="${fecha}" onchange="setNextDelivery(${locId}, this.value)">
-        ${fecha
-          ? `<span class="small text-muted">en ${daysTo} día${daysTo===1?'':'s'} — el colchón descuenta lo que se consume hasta esa fecha</span>`
-          : '<span class="small text-warning"><i class="bi bi-exclamation-triangle me-1"></i>Sin fecha cargada: el colchón se calcula como si la entrega fuera hoy</span>'}
-      </div>
       <div class="row g-3 mb-3">
         <div class="col-3"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-danger">${nRojo}</div><div class="small text-muted">Críticos (&lt;7 días)</div></div></div>
         <div class="col-3"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-warning">${nAmar}</div><div class="small text-muted">Atención (7-15 días)</div></div></div>
@@ -2340,7 +2324,7 @@ function renderStockRows() {
           <td class="text-end pe-3">${badge(x)}</td>
         </tr>`).join('')}</tbody>
       </table></div></div>
-      <p class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Colchón = los días de stock que sobran <strong>después</strong> de cubrir el consumo hasta la próxima entrega, sobre un objetivo de 7 días de reserva. Si un producto no llega al 100%, el próximo pedido debería reforzarlo aunque hoy tenga stock. Stock en negativo o "revisar" = hay compras sin procesar en Nucleo o falta un conteo. Los días se calculan con el promedio de los últimos 15 días, incluye fines de semana.</p>`;
+      <p class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>La barra "Colchón" muestra los días de mercadería que quedan <strong>antes</strong> de empezar a consumir el colchón de seguridad de 7 días (100% = 15 días libres). <strong>0% en rojo = ya te estás comiendo la reserva</strong> y el pedido no puede esperar. Stock en negativo o "revisar" = hay compras sin procesar en Nucleo o falta un conteo. Los días se calculan con el promedio de los últimos 15 días, incluye fines de semana.</p>`;
 }
 
 // Movimiento de ajuste con reintento entero (ingredientes no fraccionables)
