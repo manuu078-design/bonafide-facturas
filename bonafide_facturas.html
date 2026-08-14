@@ -2276,27 +2276,39 @@ async function loadStockTable(locId) {
       if (x.d > 90) return '<span class="badge bg-success">+90 días</span>';
       return `<span class="badge bg-success">${Math.round(x.d)} días</span>`;
     };
+    const colch = x => {
+      if (x.d === null) return '<span class="small text-muted">—</span>';
+      const pct = Math.max(0, Math.min(100, Math.round(x.d / 7 * 100)));
+      const col = pct >= 100 ? 'bg-success' : pct >= 50 ? 'bg-warning' : 'bg-danger';
+      return `<div class="progress" style="height:15px;min-width:80px" title="${pct}% del colchón de 7 días">
+        <div class="progress-bar ${col}" style="width:${pct}%">${pct}%</div></div>`;
+    };
+    const conDias = rows.filter(x => x.d !== null);
+    const nColch = conDias.filter(x => x.d >= 7).length;
     body.innerHTML = `
       <div class="row g-3 mb-3">
-        <div class="col-4"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-danger">${nRojo}</div><div class="small text-muted">Críticos (&lt;7 días)</div></div></div>
-        <div class="col-4"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-warning">${nAmar}</div><div class="small text-muted">Atención (7-15 días)</div></div></div>
-        <div class="col-4"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-success">${rows.length - nRojo - nAmar}</div><div class="small text-muted">OK</div></div></div>
+        <div class="col-3"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-danger">${nRojo}</div><div class="small text-muted">Críticos (&lt;7 días)</div></div></div>
+        <div class="col-3"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-warning">${nAmar}</div><div class="small text-muted">Atención (7-15 días)</div></div></div>
+        <div class="col-3"><div class="card p-3 text-center"><div class="fs-3 fw-bold text-success">${rows.length - nRojo - nAmar}</div><div class="small text-muted">OK</div></div></div>
+        <div class="col-3"><div class="card p-3 text-center"><div class="fs-3 fw-bold ${nColch===conDias.length?'text-success':'text-primary'}">${conDias.length?Math.round(nColch/conDias.length*100):0}%</div><div class="small text-muted">Colchón 7 días armado (${nColch}/${conDias.length})</div></div></div>
       </div>
       <div class="card"><div class="card-body p-0"><table class="table table-sm table-hover mb-0">
         <thead class="table-light"><tr>
           <th class="ps-3">Ingrediente</th>
           <th class="text-end">Stock</th>
           <th class="text-end">Consumo</th>
+          <th class="text-end">Colchón 7d</th>
           <th class="text-end pe-3">Días restantes</th>
         </tr></thead>
         <tbody>${rows.map(x => `<tr class="${x.d!==null&&x.d<7?'table-danger':x.d!==null&&x.d<15?'table-warning':''}">
           <td class="ps-3">${esc(x.n)}</td>
           <td class="text-end ${x.s<0?'text-danger fw-bold':''}">${fmtS(x)}</td>
           <td class="text-end small text-muted">${x.rate>0?fmtR(x):'—'}</td>
+          <td class="text-end">${colch(x)}</td>
           <td class="text-end pe-3">${badge(x)}</td>
         </tr>`).join('')}</tbody>
       </table></div></div>
-      <p class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Stock en negro negativo o "revisar" = hay compras sin procesar en Nucleo o falta un conteo. Los días se calculan con el promedio de los últimos 15 días, incluye fines de semana.</p>`;
+      <p class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Colchón = qué porcentaje de una semana de venta cubre el stock actual; el objetivo es que todos lleguen al 100%. Stock en negativo o "revisar" = hay compras sin procesar en Nucleo o falta un conteo. Los días se calculan con el promedio de los últimos 15 días, incluye fines de semana.</p>`;
   } catch(e) {
     body.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
   }
