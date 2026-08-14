@@ -2292,12 +2292,16 @@ function renderStockRows() {
     const libres = x.d - 7;
     const pct = Math.max(0, Math.min(100, Math.round(libres / 15 * 100)));
     const col = libres <= 0 ? 'bg-danger' : pct < 33 ? 'bg-warning' : 'bg-success';
+    const falta = Math.round((7 - x.d) * 10) / 10;
     const tip = libres > 0
       ? `${Math.round(libres*10)/10} días de mercadería antes de tocar el colchón de 7 (100% = 15 días libres)`
-      : `Ya se está consumiendo el colchón de seguridad: quedan ${Math.max(0,Math.round(x.d*10)/10)} días de stock`;
-    return `<div class="d-flex align-items-center gap-1 justify-content-end" style="min-width:110px" title="${tip}">
+      : `Ya se está consumiendo el colchón: quedan ${Math.max(0,Math.round(x.d*10)/10)} días de stock — faltan ${falta} días de consumo para completar la reserva de 7`;
+    const lbl = libres <= 0
+      ? `<span class="small text-danger fw-bold" style="min-width:52px">faltan ${falta}d</span>`
+      : `<span class="small text-muted" style="min-width:32px">${pct}%</span>`;
+    return `<div class="d-flex align-items-center gap-1 justify-content-end" style="min-width:120px" title="${tip}">
       <div class="progress flex-grow-1" style="height:13px;max-width:80px"><div class="progress-bar ${col}" style="width:${Math.max(pct,3)}%"></div></div>
-      <span class="small ${libres<=0?'text-danger fw-bold':'text-muted'}" style="min-width:32px">${pct}%</span></div>`;
+      ${lbl}</div>`;
   };
   const conDias = rows.filter(x => x.d !== null);
   const nColch = conDias.filter(x => x.d >= 7).length;
