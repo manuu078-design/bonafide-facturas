@@ -96,10 +96,67 @@
 <div id="page-stock" class="page">
   <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
     <h4 class="fw-bold mb-0"><i class="bi bi-box-seam text-muted me-2"></i>Stock Bonafide</h4>
-    <div id="stock-locs" class="d-flex gap-2 flex-wrap"></div>
+    <ul class="nav nav-pills">
+      <li class="nav-item"><button id="stock-tab-btn-stock" class="nav-link active" onclick="showStockTab('stock')">Stock</button></li>
+      <li class="nav-item"><button id="stock-tab-btn-transfer" class="nav-link" onclick="showStockTab('transfer')">Transferencias</button></li>
+    </ul>
   </div>
-  <p class="small text-muted mb-3">Stock actual del sistema y días restantes según el consumo de los últimos 15 días (ventas × recetas). Solo productos Bonafide (café y golosinas).</p>
-  <div id="stock-body"><div class="text-muted">Elegí un local arriba.</div></div>
+  <div id="stock-tab-stock">
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <p class="small text-muted mb-0">Stock actual y días restantes según el consumo de los últimos 15 días (ventas × recetas). Solo productos Bonafide.</p>
+      <div id="stock-locs" class="d-flex gap-2 flex-wrap"></div>
+    </div>
+    <div id="stock-body"><div class="text-muted">Elegí un local arriba.</div></div>
+  </div>
+  <div id="stock-tab-transfer" class="d-none">
+    <div class="row g-3">
+      <div class="col-lg-5">
+        <div class="card">
+          <div class="card-header bg-transparent py-3"><h6 class="mb-0 fw-bold"><i class="bi bi-arrow-left-right me-2"></i>Nueva transferencia</h6></div>
+          <div class="card-body">
+            <div class="row g-2 mb-2">
+              <div class="col-6">
+                <label class="form-label small fw-semibold">De</label>
+                <select id="tr-from" class="form-select form-select-sm" onchange="loadTransferIngs()"></select>
+              </div>
+              <div class="col-6">
+                <label class="form-label small fw-semibold">A</label>
+                <select id="tr-to" class="form-select form-select-sm"></select>
+              </div>
+              <div class="col-6">
+                <label class="form-label small fw-semibold">Fecha</label>
+                <input type="date" id="tr-date" class="form-control form-control-sm">
+              </div>
+              <div class="col-6">
+                <label class="form-label small fw-semibold">Tipo</label>
+                <select id="tr-tipo" class="form-select form-select-sm">
+                  <option value="prestamo">Préstamo (genera deuda)</option>
+                  <option value="devolucion">Devolución (cancela deuda)</option>
+                </select>
+              </div>
+            </div>
+            <label class="form-label small fw-semibold">Productos</label>
+            <div id="tr-items"></div>
+            <datalist id="tr-ing-list"></datalist>
+            <button class="btn btn-sm btn-outline-secondary mt-1" onclick="addTransferRow()"><i class="bi bi-plus-lg me-1"></i>Agregar producto</button>
+            <hr>
+            <button id="tr-submit" class="btn btn-primary w-100" onclick="submitTransfer()"><i class="bi bi-arrow-left-right me-1"></i>Registrar y ajustar stock</button>
+            <div id="tr-status" class="small mt-2"></div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-7">
+        <div class="card mb-3">
+          <div class="card-header bg-transparent py-3"><h6 class="mb-0 fw-bold"><i class="bi bi-cash-coin me-2"></i>Deudas entre locales</h6></div>
+          <div class="card-body" id="tr-debts"><div class="small text-muted">Cargando...</div></div>
+        </div>
+        <div class="card">
+          <div class="card-header bg-transparent py-3"><h6 class="mb-0 fw-bold"><i class="bi bi-clock-history me-2"></i>Historial</h6></div>
+          <div class="card-body p-0" id="tr-history"><div class="small text-muted p-3">Cargando...</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ═══ PROVEEDORES ════════════════════════════════════════════════════════ -->
@@ -2264,6 +2321,189 @@ async function loadStockTable(locId) {
     renderStockRows();
   } catch(e) {
     body.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// ── TRANSFERENCIAS ENTRE LOCALES ─────────────────────────────────────────
+function showStockTab(t) {
+  document.getElementById('stock-tab-stock').classList.toggle('d-none', t !== 'stock');
+  document.getElementById('stock-tab-transfer').classList.toggle('d-none', t !== 'transfer');
+  document.getElementById('stock-tab-btn-stock').classList.toggle('active', t === 'stock');
+  document.getElementById('stock-tab-btn-transfer').classList.toggle('active', t === 'transfer');
+  if (t === 'transfer') initTransferView();
+}
+
+function trNorm(s) {
+  return (s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/\bcafe\b|\bbonafide\b|\bchocolate\b/g,'').replace(/\bgrs?\b|\bgr\b|(\d)g\b/g,'$1')
+    .replace(/[^a-z0-9%]/g,'');
+}
+
+function initTransferView() {
+  const locs = state.locations.filter(l => l.email);
+  const opts = locs.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('');
+  const selF = document.getElementById('tr-from'), selT = document.getElementById('tr-to');
+  if (!selF.options.length) {
+    selF.innerHTML = '<option value="">— Origen —</option>' + opts;
+    selT.innerHTML = '<option value="">— Destino —</option>' + opts;
+  }
+  if (!document.getElementById('tr-date').value)
+    document.getElementById('tr-date').value = new Date().toISOString().slice(0,10);
+  if (!document.querySelectorAll('#tr-items .tr-row').length) addTransferRow();
+  loadTransfers();
+}
+
+function addTransferRow() {
+  const div = document.createElement('div');
+  div.className = 'tr-row d-flex gap-1 mb-1';
+  div.innerHTML = `<input list="tr-ing-list" class="form-control form-control-sm tr-ing" placeholder="Ingrediente (elegí de la lista)">
+    <input type="number" class="form-control form-control-sm tr-qty" placeholder="Cant." style="max-width:90px" step="any" min="0">
+    <button class="btn btn-sm btn-outline-danger" onclick="this.parentElement.remove()"><i class="bi bi-x"></i></button>`;
+  document.getElementById('tr-items').appendChild(div);
+}
+
+async function loadTransferIngs() {
+  const locId = parseInt(document.getElementById('tr-from').value);
+  const dl = document.getElementById('tr-ing-list');
+  dl.innerHTML = '';
+  if (!locId) return;
+  const st = document.getElementById('tr-status');
+  st.textContent = 'Cargando ingredientes del origen...';
+  try {
+    const loc = state.locations.find(l => l.id === locId);
+    const jwt = await getValidJwt(loc);
+    const r = await nucleoReq('GET','IngredientStockFlow/FindIngredientsInWarehouse/?WarehouseId=1',null,jwt);
+    window.__trIngsFrom = (r.data?.Ingredients||[]);
+    dl.innerHTML = window.__trIngsFrom.map(i => `<option value="${esc(i.IngredientName)}">`).join('');
+    st.textContent = '';
+  } catch(e) { st.innerHTML = `<span class="text-danger">Error: ${esc(e.message)}</span>`; }
+}
+
+async function submitTransfer() {
+  const st = document.getElementById('tr-status');
+  const btn = document.getElementById('tr-submit');
+  const fromId = parseInt(document.getElementById('tr-from').value);
+  const toId = parseInt(document.getElementById('tr-to').value);
+  const fecha = document.getElementById('tr-date').value;
+  const tipo = document.getElementById('tr-tipo').value;
+  if (!fromId || !toId || fromId === toId) { showToast('Elegí origen y destino distintos.', 'warning'); return; }
+  const rows = [...document.querySelectorAll('#tr-items .tr-row')].map(r => ({
+    name: r.querySelector('.tr-ing').value.trim(),
+    qty: parseFloat(r.querySelector('.tr-qty').value)
+  })).filter(x => x.name && x.qty > 0);
+  if (!rows.length) { showToast('Agregá al menos un producto con cantidad.', 'warning'); return; }
+  btn.disabled = true; st.textContent = 'Conectando con Nucleo...';
+  try {
+    const locF = state.locations.find(l => l.id === fromId);
+    const locT = state.locations.find(l => l.id === toId);
+    const jwtF = await getValidJwt(locF);
+    const jwtT = await getValidJwt(locT);
+    const rF = await nucleoReq('GET','IngredientStockFlow/FindIngredientsInWarehouse/?WarehouseId=1',null,jwtF);
+    const rT = await nucleoReq('GET','IngredientStockFlow/FindIngredientsInWarehouse/?WarehouseId=1',null,jwtT);
+    const ingsF = rF.data?.Ingredients||[], ingsT = rT.data?.Ingredients||[];
+    // Resolver TODOS los matches antes de mover nada (evita quedar a mitad)
+    const plan = [], errores = [];
+    for (const it of rows) {
+      const iF = ingsF.find(i => i.IngredientName.trim().toLowerCase() === it.name.toLowerCase())
+              || ingsF.find(i => trNorm(i.IngredientName) === trNorm(it.name));
+      if (!iF) { errores.push(`"${it.name}" no existe en ${locF.name}`); continue; }
+      const iT = ingsT.find(i => trNorm(i.IngredientName) === trNorm(iF.IngredientName));
+      if (!iT) { errores.push(`"${iF.IngredientName}" no tiene equivalente en ${locT.name} — crealo primero en Nucleo`); continue; }
+      plan.push({ it, iF, iT });
+    }
+    if (errores.length) {
+      st.innerHTML = '<div class="alert alert-warning py-2 small mb-0">' + errores.map(esc).join('<br>') + '<br><strong>No se movió nada.</strong> Corregí y volvé a intentar.</div>';
+      btn.disabled = false; return;
+    }
+    const desc = (tipo === 'devolucion' ? 'Devolución' : 'Transferencia') + ` ${locF.name} → ${locT.name} ${fecha.split('-').reverse().join('/')}`;
+    const results = [];
+    let n = 0;
+    for (const p of plan) {
+      n++; st.textContent = `Moviendo ${n}/${plan.length}: ${p.iF.IngredientName}...`;
+      const mv = async (jwt, ingId, dir, qty) => {
+        const body = { IngredientId: ingId, FromWarehouseId: 1, Description: desc, ActionTypeId: 18, EntityTypeId: 23 };
+        body[dir] = qty;
+        let r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',body,jwt);
+        let txt = JSON.stringify(r.data);
+        if ((r.status !== 200 || /HasErrors":true/.test(txt)) && /entera/.test(txt)) {
+          body[dir] = Math.round(qty);
+          r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',body,jwt);
+          txt = JSON.stringify(r.data);
+        }
+        return r.status === 200 && !/HasErrors":true/.test(txt) ? null : txt.slice(0,120);
+      };
+      const e1 = await mv(jwtF, p.iF.IngredientId, 'Outcome', p.it.qty);
+      const e2 = e1 ? 'no aplicado (falló origen)' : await mv(jwtT, p.iT.IngredientId, 'Income', p.it.qty);
+      results.push({ name: p.iF.IngredientName, destName: p.iT.IngredientName, qty: p.it.qty,
+        unit: p.iF.MeasurementUnitName || '', ok: !e1 && !e2, err: e1 || e2 || null });
+    }
+    st.textContent = 'Guardando registro...';
+    await fetch('/api/transfer', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ date: fecha, tipo, fromId, fromName: locF.name, toId, toName: locT.name,
+        items: results.map(r => ({ name: r.name, qty: r.qty, unit: r.unit, ok: r.ok })) }) });
+    const bad = results.filter(r => !r.ok);
+    st.innerHTML = bad.length
+      ? '<div class="alert alert-warning py-2 small mb-0">Aplicado con errores:<br>' + bad.map(b => esc(b.name + ': ' + b.err)).join('<br>') + '</div>'
+      : '<div class="alert alert-success py-2 small mb-0"><i class="bi bi-check-circle me-1"></i>Transferencia aplicada: stock ajustado en los dos locales.</div>';
+    document.getElementById('tr-items').innerHTML = ''; addTransferRow();
+    loadTransfers();
+  } catch(e) {
+    st.innerHTML = `<div class="alert alert-danger py-2 small mb-0">Error: ${esc(e.message)}</div>`;
+  } finally { btn.disabled = false; }
+}
+
+function trEmpresa(name) {
+  return /obligado|juramento/i.test(name||'') ? 'DE LOS CAFE SA' : 'UN CORTADO SA';
+}
+
+async function loadTransfers() {
+  try {
+    const r = await fetch('/api/transfers');
+    const list = await r.json();
+    window.__transfers = list;
+    // Historial
+    const hist = document.getElementById('tr-history');
+    if (!list.length) hist.innerHTML = '<div class="small text-muted p-3">Sin transferencias registradas.</div>';
+    else hist.innerHTML = `<table class="table table-sm mb-0"><thead class="table-light"><tr>
+      <th class="ps-3">Fecha</th><th>De → A</th><th>Productos</th></tr></thead><tbody>` +
+      [...list].reverse().slice(0,30).map(t => `<tr>
+        <td class="ps-3 small">${esc((t.date||'').split('-').reverse().join('/'))}${t.tipo==='devolucion'?' <span class="badge text-bg-light border">devolución</span>':''}</td>
+        <td class="small">${esc(t.fromName)} → ${esc(t.toName)}</td>
+        <td class="small text-muted">${(t.items||[]).map(i => esc(i.name) + ' ×' + i.qty).join(', ')}</td>
+      </tr>`).join('') + '</tbody></table>';
+    // Deudas: neto por par de locales e ingrediente (préstamo suma, devolución o préstamo inverso resta)
+    const debts = {};
+    for (const t of list) {
+      for (const i of (t.items||[])) {
+        if (i.ok === false) continue;
+        const key = trNorm(i.name);
+        const sign = 1;
+        const pair = [t.fromName, t.toName].sort().join('|');
+        debts[pair] = debts[pair] || {};
+        const d = debts[pair];
+        d[key] = d[key] || { name: i.name, unit: i.unit || '', net: 0, a: [t.fromName, t.toName].sort()[0] };
+        // positivo = el primero del par (alfabético) le prestó al segundo
+        const dir = t.fromName === d[key].a ? 1 : -1;
+        d[key].net += dir * i.qty * sign;
+      }
+    }
+    const out = [];
+    for (const [pair, items] of Object.entries(debts)) {
+      const [A, B] = pair.split('|');
+      const oweBtoA = Object.values(items).filter(x => x.net > 0.01);
+      const oweAtoB = Object.values(items).filter(x => x.net < -0.01);
+      const fmt = x => {
+        const q = Math.abs(Math.round(x.net * 100) / 100);
+        return (x.unit||'').toLowerCase().startsWith('gramo') ? esc(x.name) + ' ' + (q/1000) + 'kg' : esc(x.name) + ' ×' + q;
+      };
+      const inter = trEmpresa(A) !== trEmpresa(B) ? ' <span class="badge bg-danger">entre empresas</span>' : '';
+      if (oweBtoA.length) out.push(`<div class="mb-2"><strong>${esc(B)}</strong> le debe a <strong>${esc(A)}</strong>${inter}:<br><span class="small text-muted">${oweBtoA.map(fmt).join(' · ')}</span></div>`);
+      if (oweAtoB.length) out.push(`<div class="mb-2"><strong>${esc(A)}</strong> le debe a <strong>${esc(B)}</strong>${inter}:<br><span class="small text-muted">${oweAtoB.map(fmt).join(' · ')}</span></div>`);
+    }
+    document.getElementById('tr-debts').innerHTML = out.length ? out.join('') :
+      '<div class="small text-muted">Nadie debe nada — todo saldado <i class="bi bi-check-circle text-success"></i></div>';
+  } catch(e) {
+    document.getElementById('tr-debts').innerHTML = `<div class="small text-danger">Error: ${esc(e.message)}</div>`;
   }
 }
 

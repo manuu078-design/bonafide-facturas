@@ -33,6 +33,7 @@ PHOTOS_DIR = DATA_DIR / "photos"
 INBOX_FILE = DATA_DIR / "inbox.json"
 PLANILLAS_FILE = DATA_DIR / "planillas.json"   # {locName: {locId, ts, items:[{id,name,unit}]}}
 CONTEOS_FILE = DATA_DIR / "conteos.json"       # [{id, loc, locId, by, ts, items:[{id,name,unit,qty}], status}]
+TRANSFERS_FILE = DATA_DIR / "transfers.json"   # [{id, ts, date, tipo, fromId, fromName, toId, toName, items:[{name,qty,unit,ok}]}]
 
 LOCATIONS = ["Palmas del Pilar", "Unicenter", "Leloir", "Obligado", "Juramento"]
 
@@ -352,6 +353,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_error(404, "Sin planilla para ese local")
         elif path == "/api/conteos":
             self._send_json(load_json(CONTEOS_FILE, []))
+        elif path == "/api/transfers":
+            self._send_json(load_json(TRANSFERS_FILE, []))
         elif path == "/api/inbox":
             self._api_inbox(query)
         elif path.startswith("/api/photo/"):
@@ -377,6 +380,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_conteo_save()
         elif path == "/api/conteo/update":
             self._api_conteo_update()
+        elif path == "/api/transfer":
+            self._api_transfer_save()
         else:
             self.send_error(404)
 
@@ -551,6 +556,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         save_json(CONTEOS_FILE, cts)
         self._send_json({"ok": True})
+
+    def _api_transfer_save(self):
+        data = self._read_json()
+        if data is None:
+            return
+        if not data.get("fromName") or not data.get("toName") or not data.get("items"):
+            self._json_error(400, "Faltan datos de la transferencia")
+            return
+        lst = load_json(TRANSFERS_FILE, [])
+        rec = {
+            "id": uuid.uuid4().hex[:12],
+            "ts": time.strftime("%Y-%m-%d %H:%M"),
+            "date": str(data.get("date") or "")[:10],
+            "tipo": str(data.get("tipo") or "prestamo"),
+            "fromId": data.get("fromId"), "fromName": str(data.get("fromName"))[:80],
+            "toId": data.get("toId"), "toName": str(data.get("toName"))[:80],
+            "items": [{"name": str(i.get("name",""))[:80], "qty": float(i.get("qty") or 0),
+                       "unit": str(i.get("unit",""))[:30], "ok": bool(i.get("ok", True))}
+                      for i in (data.get("items") or [])[:50]],
+        }
+        lst.append(rec)
+        save_json(TRANSFERS_FILE, lst)
+        self._send_json({"ok": True, "id": rec["id"]})
 
     # ── Serve local HTML ─────────────────────────────────────────────────
     def _serve_html(self):
