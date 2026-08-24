@@ -2974,6 +2974,7 @@ function renderDashboard() {
           ${overdue.map(inv => `<tr>
             <td class="ps-3"><span class="fw-bold text-danger">${daysUnpaid(inv)} días</span>
               <span class="small text-muted ms-1">(${inv.date||'—'})</span></td>
+            <td class="fw-semibold">${esc((inv.supplier||'').trim()||'(sin proveedor)')}</td>
             <td class="small">${esc(companyOfInv(inv))}</td>
             <td class="small text-muted">${esc(loc(inv.locId))}</td>
             <td class="font-monospace small">${esc(inv.number||'—')}</td>
