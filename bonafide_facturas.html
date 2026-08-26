@@ -2373,8 +2373,23 @@ function showStockTab(t) {
 
 function trNorm(s) {
   return (s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
-    .replace(/\bcafe\b|\bbonafide\b|\bchocolate\b/g,'').replace(/\bgrs?\b|\bgr\b|(\d)g\b/g,'$1')
+    .replace(/\bcafe\b|\bbonafide\b|\bchocolate\b/g,'')
+    .replace(/(\d)\s*(?:grs?|g|kg|kl)\b/g,'$1')
+    .replace(/\bgrs?\b|\bkg\b/g,'')
     .replace(/[^a-z0-9%]/g,'');
+}
+
+// Busca un ingrediente por nombre normalizado; si no hay match exacto,
+// acepta que uno contenga al otro siempre que el candidato sea único.
+function trFind(list, name) {
+  const n = trNorm(name);
+  let hit = list.find(i => trNorm(i.IngredientName) === n);
+  if (hit) return hit;
+  const cands = list.filter(i => {
+    const m = trNorm(i.IngredientName);
+    return (m.length >= 5 && n.includes(m)) || (n.length >= 5 && m.includes(n));
+  });
+  return cands.length === 1 ? cands[0] : null;
 }
 
 function initTransferView() {
@@ -2443,9 +2458,9 @@ async function submitTransfer() {
     const plan = [], errores = [];
     for (const it of rows) {
       const iF = ingsF.find(i => i.IngredientName.trim().toLowerCase() === it.name.toLowerCase())
-              || ingsF.find(i => trNorm(i.IngredientName) === trNorm(it.name));
+              || trFind(ingsF, it.name);
       if (!iF) { errores.push(`"${it.name}" no existe en ${locF.name}`); continue; }
-      const iT = ingsT.find(i => trNorm(i.IngredientName) === trNorm(iF.IngredientName));
+      const iT = trFind(ingsT, iF.IngredientName);
       if (!iT) { errores.push(`"${iF.IngredientName}" no tiene equivalente en ${locT.name} — crealo primero en Nucleo`); continue; }
       plan.push({ it, iF, iT });
     }
@@ -2453,6 +2468,38 @@ async function submitTransfer() {
       st.innerHTML = '<div class="alert alert-warning py-2 small mb-0">' + errores.map(esc).join('<br>') + '<br><strong>No se movió nada.</strong> Corregí y volvé a intentar.</div>';
       btn.disabled = false; return;
     }
+    // Vista previa: mostrar qué se descuenta y qué se suma, y esperar confirmación
+    window.__trPlan = { plan, locF, locT, jwtF, jwtT, fecha, tipo };
+    st.innerHTML = `<div class="card border-primary"><div class="card-body p-2">
+      <div class="fw-semibold small mb-2"><i class="bi bi-eye me-1"></i>Revisá el detalle antes de confirmar:</div>
+      <table class="table table-sm small mb-2"><thead class="table-light"><tr>
+        <th>Se descuenta en ${esc(locF.name)}</th><th class="text-end">Cant.</th><th>Se suma en ${esc(locT.name)}</th>
+      </tr></thead><tbody>
+      ${plan.map(p => `<tr>
+        <td class="text-danger">− ${esc(p.iF.IngredientName)}</td>
+        <td class="text-end fw-semibold">${p.it.qty}</td>
+        <td class="text-primary">+ ${esc(p.iT.IngredientName)}</td>
+      </tr>`).join('')}
+      </tbody></table>
+      <button class="btn btn-sm btn-primary" onclick="confirmTransfer()"><i class="bi bi-check2 me-1"></i>Confirmar y ajustar stock</button>
+      <button class="btn btn-sm btn-outline-secondary ms-1" onclick="document.getElementById('tr-status').innerHTML='';window.__trPlan=null;">Cancelar</button>
+    </div></div>`;
+    btn.disabled = false;
+    return;
+  } catch(e) {
+    st.innerHTML = `<div class="alert alert-danger py-2 small mb-0">Error: ${esc(e.message)}</div>`;
+    btn.disabled = false;
+  }
+}
+
+async function confirmTransfer() {
+  const P = window.__trPlan;
+  if (!P) return;
+  const { plan, locF, locT, jwtF, jwtT, fecha, tipo } = P;
+  const st = document.getElementById('tr-status');
+  const btn = document.getElementById('tr-submit');
+  btn.disabled = true;
+  try {
     const desc = (tipo === 'devolucion' ? 'Devolución' : 'Transferencia') + ` ${locF.name} → ${locT.name} ${fecha.split('-').reverse().join('/')}`;
     const results = [];
     let n = 0;
@@ -2484,6 +2531,7 @@ async function submitTransfer() {
       ? '<div class="alert alert-warning py-2 small mb-0">Aplicado con errores:<br>' + bad.map(b => esc(b.name + ': ' + b.err)).join('<br>') + '</div>'
       : '<div class="alert alert-success py-2 small mb-0"><i class="bi bi-check-circle me-1"></i>Transferencia aplicada: stock ajustado en los dos locales.</div>';
     document.getElementById('tr-items').innerHTML = ''; addTransferRow();
+    window.__trPlan = null;
     loadTransfers();
   } catch(e) {
     st.innerHTML = `<div class="alert alert-danger py-2 small mb-0">Error: ${esc(e.message)}</div>`;
@@ -2586,8 +2634,8 @@ async function marcarDevuelto(idx) {
       return r.status === 200 && !/HasErrors":true/.test(t);
     };
     for (const it of d.items) {
-      const f = iF.find(x => trNorm(x.IngredientName) === trNorm(it.name));
-      const t = iT.find(x => trNorm(x.IngredientName) === trNorm(it.name));
+      const f = trFind(iF, it.name);
+      const t = trFind(iT, it.name);
       if (f) { if (!await mv(jwtF, f.IngredientId, 'Outcome', it.qty)) avisos.push(it.name + ': no se pudo descontar en ' + d.from); }
       else avisos.push(it.name + ': no existe como ingrediente en ' + d.from + ' (solo se salda la deuda)');
       if (t) { if (!await mv(jwtT, t.IngredientId, 'Income', it.qty)) avisos.push(it.name + ': no se pudo sumar en ' + d.to); }
