@@ -2206,7 +2206,42 @@ function renderConteos() {
   const box = document.getElementById('conteos-container');
   if (!box) return;
   const items = conteosCache.filter(c => c.status === 'new');
-  if (!items.length) { box.innerHTML = ''; return; }
+  const hist = conteosCache.filter(c => c.status === 'processed' && c.diffs && c.diffs.length);
+  let histHtml = '';
+  if (hist.length) {
+    histHtml = `<div class="card mt-3">
+      <div class="card-header bg-white py-2">
+        <small class="fw-semibold text-muted"><i class="bi bi-clipboard-data me-1"></i>Historial de conteos — diferencias registradas</small>
+      </div>
+      <div class="card-body p-0"><table class="table table-sm mb-0">
+        <thead class="table-light"><tr>
+          <th class="ps-3">Fecha</th><th>Local</th><th>Empleado</th>
+          <th class="text-end">Faltantes</th><th class="text-end">Valor faltante</th><th class="text-end pe-3"></th>
+        </tr></thead>
+        <tbody>
+        ${hist.slice().reverse().map(c => {
+          const falt = c.diffs.filter(d => (d.dif || 0) < 0);
+          const val = falt.reduce((s, d) => s + Math.abs(d.dif) * (d.cost || 0), 0);
+          return `<tr>
+            <td class="ps-3 small">${esc(((c.countedAt || c.ts || '') + '').replace('T', ' '))}</td>
+            <td class="small">${esc(c.loc)}</td>
+            <td class="small fw-semibold">${esc(c.by || '—')}</td>
+            <td class="text-end small ${falt.length ? 'text-danger fw-bold' : 'text-success'}">${falt.length}</td>
+            <td class="text-end small fw-bold ${val > 0 ? 'text-danger' : 'text-success'}">${val > 0 ? fmt$(val) : '—'}</td>
+            <td class="text-end pe-3"><button class="btn btn-sm btn-link p-0" onclick="document.getElementById('chist-${c.id}').classList.toggle('d-none')">detalle</button></td>
+          </tr>
+          <tr class="d-none" id="chist-${c.id}"><td colspan="6" class="p-2" style="background:#fafafa">
+            ${c.diffs.map(d => `<div class="small d-flex justify-content-between border-bottom py-1">
+              <span>${esc(d.name)} <span class="text-muted">(sistema ${(+d.sys).toLocaleString('es-AR')} / contado ${(+d.qty).toLocaleString('es-AR')}${d.vendido ? ' − ' + (+d.vendido).toLocaleString('es-AR') + ' vendidos' : ''})</span></span>
+              <span class="fw-semibold ${d.dif < 0 ? 'text-danger' : 'text-primary'}">${d.dif > 0 ? '+' : ''}${(+d.dif).toLocaleString('es-AR')} ${esc(d.unit || '')}${d.cost && d.dif < 0 ? ' · ' + fmt$(Math.abs(d.dif) * d.cost) : ''}</span>
+            </div>`).join('')}
+          </td></tr>`;
+        }).join('')}
+        </tbody></table></div>
+      <div class="card-footer bg-white py-2"><small class="text-muted">Rojo = faltante (merma) valorizado al costo del ingrediente. Azul = sobrante. El valor faltante es la referencia para descontar a fin de mes.</small></div>
+    </div>`;
+  }
+  if (!items.length) { box.innerHTML = histHtml; return; }
   box.innerHTML = `<div class="card border-success">
     <div class="card-header py-3 d-flex justify-content-between align-items-center" style="background:#e8f7ee">
       <h6 class="mb-0 fw-bold"><i class="bi bi-clipboard-check-fill me-2 text-success"></i>
@@ -2225,7 +2260,7 @@ function renderConteos() {
             <button class="btn btn-sm btn-outline-danger ms-1" onclick="deleteConteo('${c.id}')"><i class="bi bi-trash3"></i></button>
           </div>
         </div>`).join('')}
-    </div></div>`;
+    </div></div>` + histHtml;
 }
 
 async function deleteConteo(id) {
@@ -2677,7 +2712,8 @@ async function renderConteoDetail() {
       const vendido = +(consDesde[it.id] || 0).toFixed(2);
       const target = +(it.qty - vendido).toFixed(2);   // contado ajustado a AHORA
       const dif = sys === null ? null : +(target - sys).toFixed(2);
-      return { ...it, sys, vendido, target, dif };
+      const cost = byId[it.id] ? (byId[it.id].IngredientCost || 0) : 0;
+      return { ...it, sys, vendido, target, dif, cost };
     });
     const conDif = rows.filter(x => x.dif !== null && Math.abs(x.dif) > 0.005);
     window.__conteoRows = rows;
@@ -2739,10 +2775,12 @@ async function applyConteo() {
         if (res.ok) ok++; else errs.push(x.name);
       } catch(e) { errs.push(x.name); }
     }
+    const diffs = (window.__conteoRows || []).filter(x => x.dif !== null && Math.abs(x.dif) > 0.005)
+      .map(x => ({ name: x.name, unit: x.unit || '', sys: x.sys, qty: x.qty, vendido: x.vendido, dif: x.dif, cost: x.cost || 0 }));
     await fetch('/api/conteo/update', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ id: c.id, action: 'processed' }) });
-    c.status = 'processed';
-    showToast(errs.length ? `⚠️ ${ok} ajustados, fallaron: ${errs.join(', ')}` : `✅ Stock ajustado: ${ok} ingredientes.`, errs.length?'warning':'success');
+      body: JSON.stringify({ id: c.id, action: 'processed', diffs }) });
+    c.status = 'processed'; c.diffs = diffs;
+    showToast(errs.length ? `⚠️ ${ok} ajustados, fallaron: ${errs.join(', ')}` : `✅ Stock ajustado: ${ok} ingredientes. Las diferencias quedaron en el historial.`, errs.length?'warning':'success');
     showPage('dashboard');
   } catch(e) {
     showToast('❌ ' + e.message, 'danger');
@@ -2752,9 +2790,11 @@ async function applyConteo() {
 
 async function markConteoDone() {
   const c = conteosCache.find(x => x.id === currentConteoId);
+  const diffs = (window.__conteoRows || []).filter(x => x.dif !== null && Math.abs(x.dif) > 0.005)
+    .map(x => ({ name: x.name, unit: x.unit || '', sys: x.sys, qty: x.qty, vendido: x.vendido, dif: x.dif, cost: x.cost || 0 }));
   await fetch('/api/conteo/update', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ id: c.id, action: 'processed' }) });
-  c.status = 'processed';
+    body: JSON.stringify({ id: c.id, action: 'processed', diffs }) });
+  c.status = 'processed'; c.diffs = diffs;
   showPage('dashboard');
 }
 

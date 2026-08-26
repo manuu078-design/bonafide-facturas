@@ -549,6 +549,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if action == "processed":
             item["status"] = "processed"
+            if data.get("diffs") is not None:
+                item["diffs"] = [{"name": str(d.get("name", ""))[:80], "unit": str(d.get("unit", ""))[:30],
+                                  "sys": d.get("sys"), "qty": d.get("qty"), "vendido": d.get("vendido"),
+                                  "dif": d.get("dif"), "cost": d.get("cost")}
+                                 for d in (data.get("diffs") or [])[:200]]
+                item["appliedTs"] = time.strftime("%Y-%m-%d %H:%M")
         elif action == "delete":
             cts = [x for x in cts if x["id"] != cid]
         else:
