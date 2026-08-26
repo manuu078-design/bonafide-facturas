@@ -2476,6 +2476,7 @@ async function loadTransfers() {
       </tr>`).join('') + '</tbody></table>';
     // Deudas: neto por par de locales e ingrediente (préstamo suma, devolución o préstamo inverso resta)
     const debts = {};
+    window.__debtPairs = [];
     for (const t of list) {
       for (const i of (t.items||[])) {
         if (i.ok === false) continue;
@@ -2500,13 +2501,72 @@ async function loadTransfers() {
         return (x.unit||'').toLowerCase().startsWith('gramo') ? esc(x.name) + ' ' + (q/1000) + 'kg' : esc(x.name) + ' ×' + q;
       };
       const inter = trEmpresa(A) !== trEmpresa(B) ? ' <span class="badge bg-danger">entre empresas</span>' : '';
-      if (oweBtoA.length) out.push(`<div class="mb-2"><strong>${esc(B)}</strong> le debe a <strong>${esc(A)}</strong>${inter}:<br><span class="small text-muted">${oweBtoA.map(fmt).join(' · ')}</span></div>`);
-      if (oweAtoB.length) out.push(`<div class="mb-2"><strong>${esc(A)}</strong> le debe a <strong>${esc(B)}</strong>${inter}:<br><span class="small text-muted">${oweAtoB.map(fmt).join(' · ')}</span></div>`);
+      const block = (deudor, acreedor, its) => {
+        const idx = window.__debtPairs.length;
+        window.__debtPairs.push({ from: deudor, to: acreedor,
+          items: its.map(x => ({ name: x.name, qty: Math.abs(Math.round(x.net * 100) / 100), unit: x.unit })) });
+        out.push(`<div class="mb-2 d-flex justify-content-between align-items-start gap-2">
+          <div><strong>${esc(deudor)}</strong> le debe a <strong>${esc(acreedor)}</strong>${inter}:<br>
+          <span class="small text-muted">${its.map(fmt).join(' · ')}</span></div>
+          <button class="btn btn-sm btn-success text-nowrap" onclick="marcarDevuelto(${idx})"><i class="bi bi-check2-circle me-1"></i>Devuelto</button></div>`);
+      };
+      if (oweBtoA.length) block(B, A, oweBtoA);
+      if (oweAtoB.length) block(A, B, oweAtoB);
     }
     document.getElementById('tr-debts').innerHTML = out.length ? out.join('') :
       '<div class="small text-muted">Nadie debe nada — todo saldado <i class="bi bi-check-circle text-success"></i></div>';
   } catch(e) {
     document.getElementById('tr-debts').innerHTML = `<div class="small text-danger">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+async function marcarDevuelto(idx) {
+  const d = (window.__debtPairs || [])[idx];
+  if (!d) return;
+  if (!confirm(`¿Confirmás que ${d.from} le devolvió todo a ${d.to}?\n\n` +
+      d.items.map(i => i.name + ' × ' + i.qty).join('\n') +
+      '\n\nSe descuenta el stock en ' + d.from + ' y se suma en ' + d.to + '.')) return;
+  const el = document.getElementById('tr-debts');
+  el.innerHTML = '<div class="small text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Aplicando devolución...</div>';
+  try {
+    const findLoc = n => state.locations.find(l => l.name === n) || state.locations.find(l => trNorm(l.name) === trNorm(n));
+    const locF = findLoc(d.from), locT = findLoc(d.to);
+    if (!locF || !locT) throw new Error('No encuentro los locales en Configuración');
+    const jwtF = await getValidJwt(locF);
+    const jwtT = await getValidJwt(locT);
+    const iF = (await nucleoReq('GET','IngredientStockFlow/FindIngredientsInWarehouse/?WarehouseId=1',null,jwtF)).data?.Ingredients || [];
+    const iT = (await nucleoReq('GET','IngredientStockFlow/FindIngredientsInWarehouse/?WarehouseId=1',null,jwtT)).data?.Ingredients || [];
+    const desc = `Devolución ${d.from} → ${d.to} ${new Date().toLocaleDateString('es-AR')}`;
+    const avisos = [];
+    const mv = async (jwt, ingId, dir, qty) => {
+      const b = { IngredientId: ingId, FromWarehouseId: 1, Description: desc, ActionTypeId: 18, EntityTypeId: 23 };
+      b[dir] = qty;
+      let r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',b,jwt);
+      let t = JSON.stringify(r.data);
+      if ((r.status !== 200 || /HasErrors":true/.test(t)) && /entera/.test(t)) {
+        b[dir] = Math.round(qty);
+        r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',b,jwt);
+        t = JSON.stringify(r.data);
+      }
+      return r.status === 200 && !/HasErrors":true/.test(t);
+    };
+    for (const it of d.items) {
+      const f = iF.find(x => trNorm(x.IngredientName) === trNorm(it.name));
+      const t = iT.find(x => trNorm(x.IngredientName) === trNorm(it.name));
+      if (f) { if (!await mv(jwtF, f.IngredientId, 'Outcome', it.qty)) avisos.push(it.name + ': no se pudo descontar en ' + d.from); }
+      else avisos.push(it.name + ': no existe como ingrediente en ' + d.from + ' (solo se salda la deuda)');
+      if (t) { if (!await mv(jwtT, t.IngredientId, 'Income', it.qty)) avisos.push(it.name + ': no se pudo sumar en ' + d.to); }
+      else avisos.push(it.name + ': no existe como ingrediente en ' + d.to + ' (solo se salda la deuda)');
+    }
+    await fetch('/api/transfer', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: new Date().toISOString().slice(0,10), tipo: 'devolucion',
+        fromId: locF.id, fromName: locF.name, toId: locT.id, toName: locT.name,
+        items: d.items.map(i => ({ name: i.name, qty: i.qty, unit: i.unit, ok: true })) }) });
+    showToast(avisos.length ? 'Devolución registrada, con avisos: ' + avisos.join(' | ') : 'Devolución aplicada: stock ajustado en los dos locales y deuda saldada.', avisos.length ? 'warning' : 'success');
+    loadTransfers();
+  } catch(e) {
+    showToast('Error: ' + e.message, 'danger');
+    loadTransfers();
   }
 }
 
