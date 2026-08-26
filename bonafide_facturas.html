@@ -2524,7 +2524,7 @@ async function confirmTransfer() {
     }
     st.textContent = 'Guardando registro...';
     await fetch('/api/transfer', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ date: fecha, tipo, fromId, fromName: locF.name, toId, toName: locT.name,
+      body: JSON.stringify({ date: fecha, tipo, fromId: locF.id, fromName: locF.name, toId: locT.id, toName: locT.name,
         items: results.map(r => ({ name: r.name, qty: r.qty, unit: r.unit, ok: r.ok })) }) });
     const bad = results.filter(r => !r.ok);
     st.innerHTML = bad.length
