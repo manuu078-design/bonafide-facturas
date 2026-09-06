@@ -34,6 +34,7 @@ INBOX_FILE = DATA_DIR / "inbox.json"
 PLANILLAS_FILE = DATA_DIR / "planillas.json"   # {locName: {locId, ts, items:[{id,name,unit}]}}
 CONTEOS_FILE = DATA_DIR / "conteos.json"       # [{id, loc, locId, by, ts, items:[{id,name,unit,qty}], status}]
 TRANSFERS_FILE = DATA_DIR / "transfers.json"   # [{id, ts, date, tipo, fromId, fromName, toId, toName, items:[{name,qty,unit,ok}]}]
+STATE_FILE     = DATA_DIR / "state.json"       # estado completo de la app (facturas, mapeos, config)
 
 LOCATIONS = ["Palmas del Pilar", "Unicenter", "Leloir", "Obligado", "Juramento"]
 
@@ -355,6 +356,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(load_json(CONTEOS_FILE, []))
         elif path == "/api/transfers":
             self._send_json(load_json(TRANSFERS_FILE, []))
+        elif path == "/api/state":
+            self._send_json(load_json(STATE_FILE, {}))
         elif path == "/api/inbox":
             self._api_inbox(query)
         elif path.startswith("/api/photo/"):
@@ -382,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_conteo_update()
         elif path == "/api/transfer":
             self._api_transfer_save()
+        elif path == "/api/state":
+            self._api_state_save()
         else:
             self.send_error(404)
 
@@ -585,6 +590,17 @@ class Handler(BaseHTTPRequestHandler):
         lst.append(rec)
         save_json(TRANSFERS_FILE, lst)
         self._send_json({"ok": True, "id": rec["id"]})
+
+    def _api_state_save(self):
+        data = self._read_json()
+        if data is None:
+            return
+        if not isinstance(data, dict):
+            self._json_error(400, "Se esperaba un objeto de estado")
+            return
+        data["_savedTs"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_json(STATE_FILE, data)
+        self._send_json({"ok": True})
 
     # ── Serve local HTML ─────────────────────────────────────────────────
     def _serve_html(self):

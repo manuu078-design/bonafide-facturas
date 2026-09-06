@@ -512,8 +512,36 @@ function loadState() {
     if (s) { const p = JSON.parse(s); Object.assign(state, p); }
   } catch(e) {}
 }
+let __statePushTimer = null;
 function saveState() {
   localStorage.setItem('bonafide_state', JSON.stringify(state));
+  // Sincronizar con el servidor (debounce) para que todos los dispositivos
+  // (compu, celular) vean los mismos datos.
+  if (!IS_PROXIED) return;
+  clearTimeout(__statePushTimer);
+  __statePushTimer = setTimeout(() => {
+    fetch('/api/state', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(state) }).catch(() => {});
+  }, 800);
+}
+async function syncStateFromServer() {
+  if (!IS_PROXIED) return;
+  try {
+    const r = await fetch('/api/state');
+    if (!r.ok) return;
+    const srv = await r.json();
+    const hasSrv = srv && Array.isArray(srv.invoices) && srv.invoices.length;
+    const hasLocal = Array.isArray(state.invoices) && state.invoices.length;
+    if (hasSrv) {
+      delete srv._savedTs;
+      Object.assign(state, srv);
+      localStorage.setItem('bonafide_state', JSON.stringify(state));
+    } else if (hasLocal) {
+      // Primera vez: este navegador tiene datos y el servidor no → subirlos.
+      fetch('/api/state', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(state) }).catch(() => {});
+    }
+  } catch (e) {}
 }
 loadState();
 
@@ -3354,6 +3382,12 @@ function renderHome() {
 renderHome();
 renderDashboard();
 populateLocationDropdowns();
+// Traer el estado compartido del servidor y refrescar la vista
+syncStateFromServer().then(() => {
+  renderHome();
+  renderDashboard();
+  populateLocationDropdowns();
+});
 </script>
 </body>
 </html>
