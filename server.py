@@ -343,7 +343,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/conteo", "/conteo/"):
             self._send_bytes(COUNT_HTML.encode(), "text/html; charset=utf-8")
         elif path == "/api/planillas":
-            self._send_json(sorted(load_json(PLANILLAS_FILE, {}).keys()))
+            # los nombres que empiezan con "__" son registros internos, no locales
+            self._send_json(sorted(k for k in load_json(PLANILLAS_FILE, {}) if not k.startswith("__")))
         elif path == "/api/planilla":
             params = dict(x.split("=", 1) for x in query.split("&") if "=" in x)
             loc = urllib.parse.unquote_plus(params.get("loc", ""))
