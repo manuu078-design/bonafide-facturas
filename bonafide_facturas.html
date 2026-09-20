@@ -3370,7 +3370,7 @@ async function loadMetrics(locId) {
         const row = { name: n, q: agg[n].q, total: agg[n].total };
         if (cat === 'ALMACEN') golosinas.push(row);
         // café en grano/molido = rubro CAFE de Nucleo (1/8, 1/4, 1/2, kg); sin cápsulas ni saquitos
-        if (cat === 'CAFE' && !/c[aá]psula|saquito|^0+$/i.test(n)) cafeGrano.push(row);
+        if (cat === 'CAFE' && !/\bcaps?\b|c[aá]psula|nespresso|dolce|saquito|^0+$/i.test(n)) cafeGrano.push(row);
         // bebidas de café: productos cuya receta descuenta café en dosis de bebida (<100 g)
         const f = await nucleoReq('GET', 'Product/FindById/' + p.Id, null, jwt);
         const rec = (f.data.ProductIngredientItems || []).find(it => coffeeIngIds.has(it.IngredientId));
@@ -3383,17 +3383,24 @@ async function loadMetrics(locId) {
 
     // 4) Comprobantes del mes (para horarios + $) y del mes pasado (para % MoM)
     const fmtDate = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
-    const invNow = await invoicesRange(jwt, fmtDate(new Date(y, m, 1)), fmtDate(new Date(y, m+1, 1)));
-    const invLast = await invoicesRange(jwt, fmtDate(new Date(lastY, lastM, 1)), fmtDate(new Date(y, m, 1)));
+    // Mes pasado + mes actual en una sola consulta (+1 día por el desfase UTC→hora local)
+    const invAll = await invoicesRange(jwt, fmtDate(new Date(lastY, lastM, 1)), fmtDate(new Date(y, m+1, 2)));
     const isSale = iv => /factura|ticket|comprobante|nota de venta/i.test(iv.DocTypeName || '') && !/cr[eé]dito/i.test(iv.DocTypeName || '');
-    // horarios
+    // Nucleo guarda Date/Hour en UTC; CurrentTimeZone (-3 = Argentina) da el desfase a hora local
+    const localOf = iv => {
+      const tz = (iv.CurrentTimeZone != null ? iv.CurrentTimeZone : -3);
+      const d = new Date(Date.parse(String(iv.Date).replace(/Z?$/, 'Z')) + tz * 3600000);
+      return { y: d.getUTCFullYear(), m: d.getUTCMonth(), day: d.getUTCDate(), h: d.getUTCHours() };
+    };
     const byHour = {}; for (let h = 0; h < 24; h++) byHour[h] = { rev: 0, tickets: 0 };
-    let revMonth = 0, ticketsMonth = 0;
-    for (const iv of invNow) { if (!isSale(iv)) continue; const h = iv.Hour != null ? iv.Hour : new Date(iv.Date).getHours(); byHour[h].rev += iv.Total || 0; byHour[h].tickets += 1; revMonth += iv.Total || 0; ticketsMonth++; }
-    // MoM: mismo período (día 1..hoy) mes actual vs mes pasado + referencia mes completo
     const today = now.getDate();
-    let revLastSame = 0, revLastFull = 0;
-    for (const iv of invLast) { if (!isSale(iv)) continue; revLastFull += iv.Total || 0; const d = iv.Date ? parseInt(String(iv.Date).slice(8,10),10) : 32; if (d <= today) revLastSame += iv.Total || 0; }
+    let revMonth = 0, ticketsMonth = 0, revLastSame = 0, revLastFull = 0;
+    for (const iv of invAll) {
+      if (!isSale(iv)) continue;
+      const L = localOf(iv); const tot = iv.Total || 0;
+      if (L.y === y && L.m === m) { byHour[L.h].rev += tot; byHour[L.h].tickets += 1; revMonth += tot; ticketsMonth++; }
+      else if (L.y === lastY && L.m === lastM) { revLastFull += tot; if (L.day <= today) revLastSame += tot; }
+    }
     const mom = revLastSame > 0 ? ((revMonth - revLastSame) / revLastSame) * 100 : null;
 
     __metricsCache[locId] = { byHour, top3g: top3(golosinas), top3c: top3(cafeGrano), top3b: top3(bebidasCafe), revMonth, ticketsMonth, revLastSame, revLastFull, mom, today };
