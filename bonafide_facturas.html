@@ -7,6 +7,7 @@
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
   body{background:#f5f6f8}
   .navbar{background:#1a1a2e!important}
@@ -50,6 +51,9 @@
     </button>
     <button class="btn btn-sm btn-outline-light" onclick="showPage('stock')">
       <i class="bi bi-box-seam"></i> Stock
+    </button>
+    <button class="btn btn-sm btn-outline-light" onclick="showPage('metrics')">
+      <i class="bi bi-graph-up"></i> Métricas
     </button>
     <button class="btn btn-sm btn-outline-light" onclick="showPage('settings')">
       <i class="bi bi-gear"></i> Configuración
@@ -95,6 +99,11 @@
     <div class="col-6 col-md-4 col-lg-2">
       <div class="card h-100 text-center py-4" style="cursor:pointer" onclick="showPage('stock');showStockTab('transfer')">
         <i class="bi bi-arrow-left-right fs-1 text-info"></i><div class="fw-semibold mt-2">Transferencias</div>
+      </div>
+    </div>
+    <div class="col-6 col-md-4 col-lg-2">
+      <div class="card h-100 text-center py-4" style="cursor:pointer" onclick="showPage('metrics')">
+        <i class="bi bi-graph-up fs-1 text-primary"></i><div class="fw-semibold mt-2">Métricas</div>
       </div>
     </div>
     <div class="col-6 col-md-4 col-lg-2">
@@ -204,6 +213,15 @@
       </div>
     </div>
   </div>
+</div>
+
+<!-- ═══ MÉTRICAS ═══════════════════════════════════════════════════════════ -->
+<div id="page-metrics" class="page">
+  <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+    <h4 class="fw-bold mb-0"><i class="bi bi-graph-up text-muted me-2"></i>Métricas <span class="small text-muted fw-normal" id="metrics-period"></span></h4>
+    <div id="metrics-locs" class="d-flex gap-2 flex-wrap"></div>
+  </div>
+  <div id="metrics-body"><div class="text-muted">Elegí un local arriba.</div></div>
 </div>
 
 <!-- ═══ PROVEEDORES ════════════════════════════════════════════════════════ -->
@@ -3281,6 +3299,177 @@ function deleteInvoice(invId) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// MÉTRICAS
+// ═══════════════════════════════════════════════════════════════════════
+let currentMetricsLocId = null;
+let __metricsChart = null;
+const __metricsCache = {};
+
+function renderMetricsPage() {
+  const bar = document.getElementById('metrics-locs');
+  if (!bar) return;
+  const locs = state.locations.filter(l => l.email);
+  bar.innerHTML = locs.map(l =>
+    `<button class="btn btn-sm ${l.id===currentMetricsLocId?'btn-primary':'btn-outline-primary'}" onclick="loadMetrics(${l.id})">${esc(l.name)}</button>`
+  ).join('');
+  const now = new Date();
+  const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+  document.getElementById('metrics-period').textContent = '· ' + meses[now.getMonth()] + ' ' + now.getFullYear() + ' (al día ' + now.getDate() + ')';
+  if (currentMetricsLocId) loadMetrics(currentMetricsLocId);
+}
+
+// café en grano/molido: ingredientes de café tostado (no cápsulas ni saquitos)
+const COFFEE_ING_RE = /\bcafe\b.*(expres|express|selecc|superior|cinta|franja|descaf|molido|colombia)|(expres|express|selecc|superior|cinta azul|franja|descafe)/i;
+
+async function loadMetrics(locId) {
+  currentMetricsLocId = locId;
+  const bar = document.getElementById('metrics-locs');
+  const locs = state.locations.filter(l => l.email);
+  bar.innerHTML = locs.map(l =>
+    `<button class="btn btn-sm ${l.id===locId?'btn-primary':'btn-outline-primary'}" onclick="loadMetrics(${l.id})">${esc(l.name)}</button>`
+  ).join('');
+  const body = document.getElementById('metrics-body');
+  const loc = state.locations.find(l => l.id === locId);
+  body.innerHTML = `<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>
+    Calculando métricas de ${esc(loc.name)}... <span id="metrics-progress"></span>
+    <div class="small mt-1">Lee ventas del mes y clasifica productos; la primera vez tarda ~30-60 s.</div></div>`;
+  try {
+    const jwt = await getValidJwt(loc);
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth();
+    // límites en ART (UTC-3) → StartDate/EndDate en UTC para el stat de ventas
+    const monthStartUTC = new Date(Date.UTC(y, m, 1, 3, 0, 0)).toUTCString();
+    const nowUTC = new Date(Date.now() + 60000).toUTCString();
+    const lastY = m === 0 ? y - 1 : y, lastM = m === 0 ? 11 : m - 1;
+    const lastStartUTC = new Date(Date.UTC(lastY, lastM, 1, 3, 0, 0)).toUTCString();
+    const lastEndUTC   = new Date(Date.UTC(y, m, 1, 3, 0, 0)).toUTCString();
+
+    // 1) Ventas por producto del mes (cantidad + $)
+    const salesR = await nucleoReq('GET', 'Stats/GetSalesByProductStats/?StartDate=' + encodeURIComponent(monthStartUTC) + '&EndDate=' + encodeURIComponent(nowUTC), null, jwt);
+    const sItems = (salesR.data && (salesR.data.Items || salesR.data)) || [];
+    const agg = {};
+    for (const it of sItems) { const k = (it.Name || '').trim(); if (!agg[k]) agg[k] = { q: 0, total: 0 }; agg[k].q += it.Quantity || 0; agg[k].total += it.Total || 0; }
+
+    // 2) Catálogo de productos (categoría) + ingredientes de café
+    const pf = await nucleoReq('GET', 'Product/Find/', null, jwt);
+    const prods = (pf.data && (pf.data.Products || pf.data)) || [];
+    const byName = {}; for (const p of prods) byName[(p.Name || '').trim()] = p;
+    const il = await nucleoReq('GET', 'IngredientList/Find/', null, jwt);
+    const ings = (il.data && (il.data.Ingredients || il.data)) || [];
+    const coffeeIngIds = new Set(ings.filter(i => COFFEE_ING_RE.test(i.Name || '')).map(i => i.Id));
+
+    // 3) Clasificar SOLO los productos vendidos (receta para bebidas/grano)
+    const sold = Object.keys(agg).filter(n => byName[n]);
+    let done = 0; const prog = document.getElementById('metrics-progress');
+    const golosinas = [], cafeGrano = [], bebidasCafe = [];
+    const q = [...sold];
+    const worker = async () => {
+      while (q.length) {
+        const n = q.shift();
+        const p = byName[n]; const cat = (p.CategoryName || '').trim().toUpperCase();
+        const row = { name: n, q: agg[n].q, total: agg[n].total };
+        if (cat === 'ALMACEN') golosinas.push(row);
+        // café: necesita receta para saber si es grano (>=100) o bebida (<100)
+        const f = await nucleoReq('GET', 'Product/FindById/' + p.Id, null, jwt);
+        const rec = (f.data.ProductIngredientItems || []).find(it => coffeeIngIds.has(it.IngredientId));
+        if (rec) { if (rec.Quantity >= 100) cafeGrano.push(row); else bebidasCafe.push(row); }
+        done++; if (prog && done % 5 === 0) prog.textContent = done + '/' + sold.length;
+      }
+    };
+    await Promise.all([0,1,2,3,4,5,6,7].map(worker));
+    const top3 = arr => arr.sort((a,b) => b.q - a.q).slice(0, 3);
+
+    // 4) Comprobantes del mes (para horarios + $) y del mes pasado (para % MoM)
+    const fmtDate = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+    const invNow = await invoicesRange(jwt, fmtDate(new Date(y, m, 1)), fmtDate(new Date(y, m+1, 1)));
+    const invLast = await invoicesRange(jwt, fmtDate(new Date(lastY, lastM, 1)), fmtDate(new Date(y, m, 1)));
+    const isSale = iv => /factura|ticket|comprobante|nota de venta/i.test(iv.DocTypeName || '') && !/cr[eé]dito/i.test(iv.DocTypeName || '');
+    // horarios
+    const byHour = {}; for (let h = 0; h < 24; h++) byHour[h] = { rev: 0, tickets: 0 };
+    let revMonth = 0, ticketsMonth = 0;
+    for (const iv of invNow) { if (!isSale(iv)) continue; const h = iv.Hour != null ? iv.Hour : new Date(iv.Date).getHours(); byHour[h].rev += iv.Total || 0; byHour[h].tickets += 1; revMonth += iv.Total || 0; ticketsMonth++; }
+    // MoM: mismo período (día 1..hoy) mes actual vs mes pasado + referencia mes completo
+    const today = now.getDate();
+    let revLastSame = 0, revLastFull = 0;
+    for (const iv of invLast) { if (!isSale(iv)) continue; revLastFull += iv.Total || 0; const d = iv.Date ? parseInt(String(iv.Date).slice(8,10),10) : 32; if (d <= today) revLastSame += iv.Total || 0; }
+    const mom = revLastSame > 0 ? ((revMonth - revLastSame) / revLastSame) * 100 : null;
+
+    __metricsCache[locId] = { byHour, top3g: top3(golosinas), top3c: top3(cafeGrano), top3b: top3(bebidasCafe), revMonth, ticketsMonth, revLastSame, revLastFull, mom, today };
+    renderMetrics(locId);
+  } catch (e) {
+    body.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+// InvoiceList/Find no está paginado: devuelve todos los comprobantes del rango
+async function invoicesRange(jwt, from, to) {
+  const r = await nucleoReq('GET', 'InvoiceList/Find/?DateFrom=' + from + '&DateTo=' + to, null, jwt);
+  return Array.isArray(r.data) ? r.data : (r.data && (r.data.Data || r.data.Invoices)) || [];
+}
+
+function renderMetrics(locId) {
+  const d = __metricsCache[locId]; if (!d) return;
+  const body = document.getElementById('metrics-body');
+  const momCard = () => {
+    if (d.mom == null) return `<div class="fs-3 fw-bold text-muted">—</div><div class="small text-muted">Sin ventas el mes pasado para comparar</div>`;
+    const up = d.mom >= 0;
+    return `<div class="fs-2 fw-bold ${up?'text-success':'text-danger'}"><i class="bi bi-arrow-${up?'up':'down'}-right"></i> ${up?'+':''}${d.mom.toFixed(1)}%</div>
+      <div class="small text-muted">vs mismo período mes pasado (1–${d.today})</div>
+      <div class="small text-muted mt-1">Este mes: <b>${fmt$(d.revMonth)}</b> · Mes pasado 1–${d.today}: ${fmt$(d.revLastSame)}</div>
+      <div class="small text-muted">Mes pasado completo: ${fmt$(d.revLastFull)}</div>`;
+  };
+  const topList = (arr, unit) => arr.length ? arr.map((x,i) => `
+      <div class="d-flex justify-content-between align-items-center py-1 ${i<arr.length-1?'border-bottom':''}">
+        <div><span class="badge ${i===0?'bg-warning text-dark':i===1?'bg-secondary':'bg-light text-dark border'} me-2">${i+1}</span>${esc(x.name)}</div>
+        <div class="fw-semibold text-nowrap">${Math.round(x.q).toLocaleString('es-AR')} ${unit}</div>
+      </div>`).join('') : '<div class="small text-muted py-2">Sin ventas registradas este mes.</div>';
+
+  body.innerHTML = `
+    <div class="row g-3 mb-3">
+      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ventas del mes</div>${momCard()}</div></div>
+      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Facturación del mes</div><div class="fs-2 fw-bold">${fmt$(d.revMonth)}</div><div class="small text-muted">${d.ticketsMonth.toLocaleString('es-AR')} tickets</div></div></div>
+      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ticket promedio</div><div class="fs-2 fw-bold">${d.ticketsMonth?fmt$(Math.round(d.revMonth/d.ticketsMonth)):'—'}</div><div class="small text-muted">promedio por comprobante</div></div></div>
+    </div>
+    <div class="card mb-3">
+      <div class="card-header bg-transparent fw-semibold"><i class="bi bi-clock-history me-2"></i>Consumo por hora <span class="small text-muted fw-normal">— barras: facturación · línea: tickets</span></div>
+      <div class="card-body"><canvas id="metrics-hour-chart" height="90"></canvas></div>
+    </div>
+    <div class="row g-3">
+      <div class="col-md-4"><div class="card h-100"><div class="card-header bg-transparent fw-semibold">🍫 Top 3 golosinas <span class="small text-muted fw-normal">(rubro Almacén)</span></div><div class="card-body">${topList(d.top3g,'u')}</div></div></div>
+      <div class="col-md-4"><div class="card h-100"><div class="card-header bg-transparent fw-semibold">☕ Top 3 café en grano</div><div class="card-body">${topList(d.top3c,'u')}</div></div></div>
+      <div class="col-md-4"><div class="card h-100"><div class="card-header bg-transparent fw-semibold">🥤 Top 3 bebidas de café</div><div class="card-body">${topList(d.top3b,'u')}</div></div></div>
+    </div>
+    <p class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Datos del mes en curso desde Nucleo (ventas por producto y comprobantes por hora). Golosinas = rubro Almacén; café en grano/bebidas se clasifican por la receta de café de cada producto.</p>`;
+
+  // gráfico combo
+  const hoursActive = [];
+  for (let h = 6; h <= 23; h++) if (d.byHour[h].rev > 0 || d.byHour[h].tickets > 0) hoursActive.push(h);
+  const hrs = hoursActive.length ? hoursActive : Array.from({length:18},(_,i)=>i+6);
+  const labels = hrs.map(h => String(h).padStart(2,'0') + 'h');
+  const revData = hrs.map(h => Math.round(d.byHour[h].rev));
+  const tkData = hrs.map(h => d.byHour[h].tickets);
+  if (__metricsChart) { __metricsChart.destroy(); __metricsChart = null; }
+  const ctx = document.getElementById('metrics-hour-chart');
+  __metricsChart = new Chart(ctx, {
+    data: {
+      labels,
+      datasets: [
+        { type: 'bar', label: 'Facturación ($)', data: revData, backgroundColor: 'rgba(26,26,46,.75)', yAxisID: 'y', order: 2 },
+        { type: 'line', label: 'Tickets', data: tkData, borderColor: '#e2c96e', backgroundColor: '#e2c96e', tension: .3, yAxisID: 'y1', order: 1, pointRadius: 3 }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: true,
+      plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: c => c.dataset.type === 'bar' ? 'Facturación: ' + fmt$(c.parsed.y) : 'Tickets: ' + c.parsed.y } } },
+      scales: {
+        y: { position: 'left', beginAtZero: true, title: { display: true, text: '$' }, ticks: { callback: v => '$' + (v/1000).toLocaleString('es-AR') + 'k' } },
+        y1: { position: 'right', beginAtZero: true, title: { display: true, text: 'tickets' }, grid: { drawOnChartArea: false } }
+      }
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // NAVIGATION & UTILS
 // ═══════════════════════════════════════════════════════════════════════
 function showPage(name, param) {
@@ -3292,6 +3481,7 @@ function showPage(name, param) {
   if (name === 'conteo') renderConteoDetail();
   if (name === 'home') renderHome();
   if (name === 'stock') renderStockPage();
+  if (name === 'metrics') renderMetricsPage();
   if (name === 'settings') {
     renderSettings();
     populateLocationDropdowns();
