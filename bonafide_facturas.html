@@ -3369,10 +3369,12 @@ async function loadMetrics(locId) {
         const p = byName[n]; const cat = (p.CategoryName || '').trim().toUpperCase();
         const row = { name: n, q: agg[n].q, total: agg[n].total };
         if (cat === 'ALMACEN') golosinas.push(row);
-        // café: necesita receta para saber si es grano (>=100) o bebida (<100)
+        // café en grano/molido = rubro CAFE de Nucleo (1/8, 1/4, 1/2, kg); sin cápsulas ni saquitos
+        if (cat === 'CAFE' && !/c[aá]psula|saquito|^0+$/i.test(n)) cafeGrano.push(row);
+        // bebidas de café: productos cuya receta descuenta café en dosis de bebida (<100 g)
         const f = await nucleoReq('GET', 'Product/FindById/' + p.Id, null, jwt);
         const rec = (f.data.ProductIngredientItems || []).find(it => coffeeIngIds.has(it.IngredientId));
-        if (rec) { if (rec.Quantity >= 100) cafeGrano.push(row); else bebidasCafe.push(row); }
+        if (rec && rec.Quantity < 100) bebidasCafe.push(row);
         done++; if (prog && done % 5 === 0) prog.textContent = done + '/' + sold.length;
       }
     };
