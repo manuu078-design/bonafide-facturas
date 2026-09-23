@@ -363,6 +363,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_inbox(query)
         elif path.startswith("/api/photo/"):
             self._api_photo(path[len("/api/photo/"):], query)
+        elif path.startswith("/archivo/"):
+            self._api_blob_get(path[len("/archivo/"):])
         elif path.startswith("/nucleo/"):
             self._proxy("GET", self.path[8:], None)
         else:
@@ -388,6 +390,8 @@ class Handler(BaseHTTPRequestHandler):
             self._api_transfer_save()
         elif path == "/api/state":
             self._api_state_save()
+        elif path == "/api/archivo":
+            self._api_blob_save()
         else:
             self.send_error(404)
 
@@ -602,6 +606,43 @@ class Handler(BaseHTTPRequestHandler):
         data["_savedTs"] = time.strftime("%Y-%m-%d %H:%M:%S")
         save_json(STATE_FILE, data)
         self._send_json({"ok": True})
+
+    # ── Archivos generados (reportes Excel, etc.) ─────────────────────────
+    def _api_blob_save(self):
+        """POST {name, b64, mime} → guarda el archivo en DATA_DIR/archivos/name."""
+        data = self._read_json()
+        if data is None:
+            return
+        name = re.sub(r"[^\w .()\-]+", "_", str(data.get("name") or ""), flags=re.UNICODE).strip()
+        if not name or not data.get("b64"):
+            self._json_error(400, "Falta name o b64")
+            return
+        d = DATA_DIR / "archivos"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_bytes(base64.b64decode(data["b64"]))
+        meta = load_json(d / "_meta.json", {})
+        meta[name] = {"mime": data.get("mime") or "application/octet-stream",
+                      "ts": time.strftime("%Y-%m-%d %H:%M:%S")}
+        save_json(d / "_meta.json", meta)
+        self._send_json({"ok": True, "url": "/archivo/" + urllib.parse.quote(name)})
+
+    def _api_blob_get(self, name):
+        name = urllib.parse.unquote(name)
+        d = DATA_DIR / "archivos"
+        f = d / name
+        if not name or "/" in name or name.startswith("_") or not f.exists():
+            self.send_error(404)
+            return
+        meta = load_json(d / "_meta.json", {}).get(name, {})
+        data = f.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", meta.get("mime") or "application/octet-stream")
+        self.send_header("Content-Length", len(data))
+        self.send_header("Content-Disposition",
+                         "attachment; filename*=UTF-8''" + urllib.parse.quote(name))
+        self._cors_headers()
+        self.end_headers()
+        self.wfile.write(data)
 
     # ── Serve local HTML ─────────────────────────────────────────────────
     def _serve_html(self):
