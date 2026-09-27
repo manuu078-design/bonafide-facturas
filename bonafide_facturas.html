@@ -3381,11 +3381,13 @@ async function loadMetrics(locId) {
     await Promise.all([0,1,2,3,4,5,6,7].map(worker));
     const top3 = arr => arr.sort((a,b) => b.q - a.q).slice(0, 3);
 
-    // 4) Comprobantes del mes (para horarios + $) y del mes pasado (para % MoM)
+    // 4) Pedidos del mes (para horarios + $) y del mes pasado (para % MoM).
+    //    Se usa el HISTORIAL DE PEDIDOS (no el de comprobantes): cuenta todo lo
+    //    vendido, esté facturado o no. Se excluyen los pedidos anulados (IsActive=false).
     const fmtDate = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
     // Mes pasado + mes actual en una sola consulta (+1 día por el desfase UTC→hora local)
-    const invAll = await invoicesRange(jwt, fmtDate(new Date(lastY, lastM, 1)), fmtDate(new Date(y, m+1, 2)));
-    const isSale = iv => /factura|ticket|comprobante|nota de venta/i.test(iv.DocTypeName || '') && !/cr[eé]dito/i.test(iv.DocTypeName || '');
+    const invAll = await ordersRange(jwt, fmtDate(new Date(lastY, lastM, 1)), fmtDate(new Date(y, m+1, 2)));
+    const isSale = o => o.IsActive !== false && (o.Total || 0) > 0;
     // Nucleo guarda Date/Hour en UTC; CurrentTimeZone (-3 = Argentina) da el desfase a hora local
     const localOf = iv => {
       const tz = (iv.CurrentTimeZone != null ? iv.CurrentTimeZone : -3);
@@ -3416,6 +3418,13 @@ async function invoicesRange(jwt, from, to) {
   return Array.isArray(r.data) ? r.data : (r.data && (r.data.Data || r.data.Invoices)) || [];
 }
 
+// OrderHistory/GetOrderHistory: todos los pedidos del rango (facturados o no).
+// Cada pedido trae Id, Date (UTC), Total, TotalPaid, IsActive, CurrentTimeZone.
+async function ordersRange(jwt, from, to) {
+  const r = await nucleoReq('GET', 'OrderHistory/GetOrderHistory/?DateFrom=' + from + '&DateTo=' + to, null, jwt);
+  return Array.isArray(r.data) ? r.data : (r.data && (r.data.Data || r.data.Orders || r.data.Items)) || [];
+}
+
 function renderMetrics(locId) {
   const d = __metricsCache[locId]; if (!d) return;
   const body = document.getElementById('metrics-body');
@@ -3436,11 +3445,11 @@ function renderMetrics(locId) {
   body.innerHTML = `
     <div class="row g-3 mb-3">
       <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ventas del mes</div>${momCard()}</div></div>
-      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Facturación del mes</div><div class="fs-2 fw-bold">${fmt$(d.revMonth)}</div><div class="small text-muted">${d.ticketsMonth.toLocaleString('es-AR')} tickets</div></div></div>
-      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ticket promedio</div><div class="fs-2 fw-bold">${d.ticketsMonth?fmt$(Math.round(d.revMonth/d.ticketsMonth)):'—'}</div><div class="small text-muted">promedio por comprobante</div></div></div>
+      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ventas del mes <span title="Todos los pedidos, facturados o no">(pedidos)</span></div><div class="fs-2 fw-bold">${fmt$(d.revMonth)}</div><div class="small text-muted">${d.ticketsMonth.toLocaleString('es-AR')} pedidos</div></div></div>
+      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ticket promedio</div><div class="fs-2 fw-bold">${d.ticketsMonth?fmt$(Math.round(d.revMonth/d.ticketsMonth)):'—'}</div><div class="small text-muted">promedio por pedido</div></div></div>
     </div>
     <div class="card mb-3">
-      <div class="card-header bg-transparent fw-semibold"><i class="bi bi-clock-history me-2"></i>Consumo por hora <span class="small text-muted fw-normal">— barras: facturación · línea: tickets</span></div>
+      <div class="card-header bg-transparent fw-semibold"><i class="bi bi-clock-history me-2"></i>Consumo por hora <span class="small text-muted fw-normal">— barras: ventas ($) · línea: pedidos</span></div>
       <div class="card-body"><canvas id="metrics-hour-chart" height="90"></canvas></div>
     </div>
     <div class="row g-3">
@@ -3463,16 +3472,16 @@ function renderMetrics(locId) {
     data: {
       labels,
       datasets: [
-        { type: 'bar', label: 'Facturación ($)', data: revData, backgroundColor: 'rgba(26,26,46,.75)', yAxisID: 'y', order: 2 },
-        { type: 'line', label: 'Tickets', data: tkData, borderColor: '#e2c96e', backgroundColor: '#e2c96e', tension: .3, yAxisID: 'y1', order: 1, pointRadius: 3 }
+        { type: 'bar', label: 'Ventas ($)', data: revData, backgroundColor: 'rgba(26,26,46,.75)', yAxisID: 'y', order: 2 },
+        { type: 'line', label: 'Pedidos', data: tkData, borderColor: '#e2c96e', backgroundColor: '#e2c96e', tension: .3, yAxisID: 'y1', order: 1, pointRadius: 3 }
       ]
     },
     options: {
       responsive: true, maintainAspectRatio: true,
-      plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: c => c.dataset.type === 'bar' ? 'Facturación: ' + fmt$(c.parsed.y) : 'Tickets: ' + c.parsed.y } } },
+      plugins: { legend: { position: 'top' }, tooltip: { callbacks: { label: c => c.dataset.type === 'bar' ? 'Ventas: ' + fmt$(c.parsed.y) : 'Pedidos: ' + c.parsed.y } } },
       scales: {
         y: { position: 'left', beginAtZero: true, title: { display: true, text: '$' }, ticks: { callback: v => '$' + (v/1000).toLocaleString('es-AR') + 'k' } },
-        y1: { position: 'right', beginAtZero: true, title: { display: true, text: 'tickets' }, grid: { drawOnChartArea: false } }
+        y1: { position: 'right', beginAtZero: true, title: { display: true, text: 'pedidos' }, grid: { drawOnChartArea: false } }
       }
     }
   });
