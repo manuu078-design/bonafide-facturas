@@ -3385,8 +3385,10 @@ async function loadMetrics(locId) {
     //    Se usa el HISTORIAL DE PEDIDOS (no el de comprobantes): cuenta todo lo
     //    vendido, esté facturado o no. Se excluyen los pedidos anulados (IsActive=false).
     const fmtDate = d => d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
-    // Mes pasado + mes actual en una sola consulta (+1 día por el desfase UTC→hora local)
-    const invAll = await ordersRange(jwt, fmtDate(new Date(lastY, lastM, 1)), fmtDate(new Date(y, m+1, 2)));
+    // Últimos 6 meses (mes actual incluido) en una sola consulta (+1 día por el desfase UTC→hora local)
+    const MONTHS_BACK = 6;
+    const firstMonth = new Date(y, m - (MONTHS_BACK - 1), 1);
+    const invAll = await ordersRange(jwt, fmtDate(firstMonth), fmtDate(new Date(y, m+1, 2)));
     const isSale = o => o.IsActive !== false && (o.Total || 0) > 0;
     // Nucleo guarda Date/Hour en UTC; CurrentTimeZone (-3 = Argentina) da el desfase a hora local
     const localOf = iv => {
@@ -3397,15 +3399,20 @@ async function loadMetrics(locId) {
     const byHour = {}; for (let h = 0; h < 24; h++) byHour[h] = { rev: 0, tickets: 0 };
     const today = now.getDate();
     let revMonth = 0, ticketsMonth = 0, revLastSame = 0, revLastFull = 0;
+    // Pedidos y ventas por mes (últimos 6 meses)
+    const byMonth = [];
+    for (let k = MONTHS_BACK - 1; k >= 0; k--) { const d = new Date(y, m - k, 1); byMonth.push({ y: d.getFullYear(), m: d.getMonth(), tickets: 0, rev: 0 }); }
+    const monthIdx = {}; byMonth.forEach((b, i) => monthIdx[b.y + '-' + b.m] = i);
     for (const iv of invAll) {
       if (!isSale(iv)) continue;
       const L = localOf(iv); const tot = iv.Total || 0;
+      const bi = monthIdx[L.y + '-' + L.m]; if (bi != null) { byMonth[bi].tickets++; byMonth[bi].rev += tot; }
       if (L.y === y && L.m === m) { byHour[L.h].rev += tot; byHour[L.h].tickets += 1; revMonth += tot; ticketsMonth++; }
       else if (L.y === lastY && L.m === lastM) { revLastFull += tot; if (L.day <= today) revLastSame += tot; }
     }
     const mom = revLastSame > 0 ? ((revMonth - revLastSame) / revLastSame) * 100 : null;
 
-    __metricsCache[locId] = { byHour, top3g: top3(golosinas), top3c: top3(cafeGrano), top3b: top3(bebidasCafe), revMonth, ticketsMonth, revLastSame, revLastFull, mom, today };
+    __metricsCache[locId] = { byHour, byMonth, top3g: top3(golosinas), top3c: top3(cafeGrano), top3b: top3(bebidasCafe), revMonth, ticketsMonth, revLastSame, revLastFull, mom, today };
     renderMetrics(locId);
   } catch (e) {
     body.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
@@ -3424,6 +3431,10 @@ async function ordersRange(jwt, from, to) {
   const r = await nucleoReq('GET', 'OrderHistory/GetOrderHistory/?DateFrom=' + from + '&DateTo=' + to, null, jwt);
   return Array.isArray(r.data) ? r.data : (r.data && (r.data.Data || r.data.Orders || r.data.Items)) || [];
 }
+
+const MONTH_NAMES_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+function monthLabel(y, m) { return MONTH_NAMES_ES[m] + ' ' + String(y).slice(2); }
+let __metricsMonthChart = null;
 
 function renderMetrics(locId) {
   const d = __metricsCache[locId]; if (!d) return;
@@ -3452,6 +3463,25 @@ function renderMetrics(locId) {
       <div class="card-header bg-transparent fw-semibold"><i class="bi bi-clock-history me-2"></i>Consumo por hora <span class="small text-muted fw-normal">— barras: ventas ($) · línea: pedidos</span></div>
       <div class="card-body"><canvas id="metrics-hour-chart" height="90"></canvas></div>
     </div>
+    <div class="card mb-3">
+      <div class="card-header bg-transparent fw-semibold"><i class="bi bi-receipt me-2"></i>Cantidad de pedidos por mes <span class="small text-muted fw-normal">— últimos ${d.byMonth.length} meses (el mes en curso va hasta hoy)</span></div>
+      <div class="card-body">
+        <div class="row g-3 align-items-center">
+          <div class="col-lg-7"><canvas id="metrics-month-chart" height="110"></canvas></div>
+          <div class="col-lg-5">
+            <table class="table table-sm mb-0 small">
+              <thead><tr><th>Mes</th><th class="text-end">Pedidos</th><th class="text-end">Ventas</th><th class="text-end">Ticket prom.</th><th class="text-end">Δ pedidos</th></tr></thead>
+              <tbody>${d.byMonth.map((b, i) => {
+                const prev = i > 0 ? d.byMonth[i-1].tickets : 0;
+                const delta = prev > 0 ? ((b.tickets - prev) / prev) * 100 : null;
+                const cur = i === d.byMonth.length - 1;
+                return `<tr class="${cur ? 'table-active fw-semibold' : ''}"><td>${monthLabel(b.y, b.m)}${cur ? ' <span class="text-muted fw-normal">(1–' + d.today + ')</span>' : ''}</td><td class="text-end">${b.tickets.toLocaleString('es-AR')}</td><td class="text-end">${fmt$(Math.round(b.rev))}</td><td class="text-end">${b.tickets ? fmt$(Math.round(b.rev / b.tickets)) : '—'}</td><td class="text-end ${delta == null ? 'text-muted' : delta >= 0 ? 'text-success' : 'text-danger'}">${delta == null ? '—' : (delta >= 0 ? '+' : '') + delta.toFixed(1) + '%'}</td></tr>`;
+              }).join('')}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="row g-3">
       <div class="col-md-4"><div class="card h-100"><div class="card-header bg-transparent fw-semibold">🍫 Top 3 golosinas <span class="small text-muted fw-normal">(rubro Almacén)</span></div><div class="card-body">${topList(d.top3g,'u')}</div></div></div>
       <div class="col-md-4"><div class="card h-100"><div class="card-header bg-transparent fw-semibold">☕ Top 3 café en grano</div><div class="card-body">${topList(d.top3c,'u')}</div></div></div>
@@ -3467,6 +3497,22 @@ function renderMetrics(locId) {
   const revData = hrs.map(h => Math.round(d.byHour[h].rev));
   const tkData = hrs.map(h => d.byHour[h].tickets);
   if (__metricsChart) { __metricsChart.destroy(); __metricsChart = null; }
+  if (__metricsMonthChart) { __metricsMonthChart.destroy(); __metricsMonthChart = null; }
+  // gráfico de pedidos por mes
+  const mctx = document.getElementById('metrics-month-chart');
+  __metricsMonthChart = new Chart(mctx, {
+    type: 'bar',
+    data: {
+      labels: d.byMonth.map(b => monthLabel(b.y, b.m)),
+      datasets: [{ label: 'Pedidos', data: d.byMonth.map(b => b.tickets),
+        backgroundColor: d.byMonth.map((b, i) => i === d.byMonth.length - 1 ? 'rgba(226,201,110,.9)' : 'rgba(26,26,46,.75)') }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: true,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => 'Pedidos: ' + c.parsed.y.toLocaleString('es-AR') } } },
+      scales: { y: { beginAtZero: true, ticks: { callback: v => v.toLocaleString('es-AR') } } }
+    }
+  });
   const ctx = document.getElementById('metrics-hour-chart');
   __metricsChart = new Chart(ctx, {
     data: {
