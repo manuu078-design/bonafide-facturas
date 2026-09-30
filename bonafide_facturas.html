@@ -3401,12 +3401,12 @@ async function loadMetrics(locId) {
     let revMonth = 0, ticketsMonth = 0, revLastSame = 0, revLastFull = 0;
     // Pedidos y ventas por mes (últimos 6 meses)
     const byMonth = [];
-    for (let k = MONTHS_BACK - 1; k >= 0; k--) { const d = new Date(y, m - k, 1); byMonth.push({ y: d.getFullYear(), m: d.getMonth(), tickets: 0, rev: 0 }); }
+    for (let k = MONTHS_BACK - 1; k >= 0; k--) { const d = new Date(y, m - k, 1); byMonth.push({ y: d.getFullYear(), m: d.getMonth(), tickets: 0, rev: 0, ticketsToDay: 0 }); }
     const monthIdx = {}; byMonth.forEach((b, i) => monthIdx[b.y + '-' + b.m] = i);
     for (const iv of invAll) {
       if (!isSale(iv)) continue;
       const L = localOf(iv); const tot = iv.Total || 0;
-      const bi = monthIdx[L.y + '-' + L.m]; if (bi != null) { byMonth[bi].tickets++; byMonth[bi].rev += tot; }
+      const bi = monthIdx[L.y + '-' + L.m]; if (bi != null) { byMonth[bi].tickets++; byMonth[bi].rev += tot; if (L.day <= today) byMonth[bi].ticketsToDay++; }
       if (L.y === y && L.m === m) { byHour[L.h].rev += tot; byHour[L.h].tickets += 1; revMonth += tot; ticketsMonth++; }
       else if (L.y === lastY && L.m === lastM) { revLastFull += tot; if (L.day <= today) revLastSame += tot; }
     }
@@ -3470,12 +3470,13 @@ function renderMetrics(locId) {
           <div class="col-lg-7"><canvas id="metrics-month-chart" height="110"></canvas></div>
           <div class="col-lg-5">
             <table class="table table-sm mb-0 small">
-              <thead><tr><th>Mes</th><th class="text-end">Pedidos</th><th class="text-end">Ventas</th><th class="text-end">Ticket prom.</th><th class="text-end">Δ pedidos</th></tr></thead>
+              <thead><tr><th>Mes</th><th class="text-end">Pedidos</th><th class="text-end">Ventas</th><th class="text-end">Ticket prom.</th><th class="text-end" title="Variación de pedidos vs. el mes anterior (el mes en curso se compara con el mismo período 1–hoy del mes anterior)">Δ vs mes ant.</th></tr></thead>
               <tbody>${d.byMonth.map((b, i) => {
-                const prev = i > 0 ? d.byMonth[i-1].tickets : 0;
-                const delta = prev > 0 ? ((b.tickets - prev) / prev) * 100 : null;
                 const cur = i === d.byMonth.length - 1;
-                return `<tr class="${cur ? 'table-active fw-semibold' : ''}"><td>${monthLabel(b.y, b.m)}${cur ? ' <span class="text-muted fw-normal">(1–' + d.today + ')</span>' : ''}</td><td class="text-end">${b.tickets.toLocaleString('es-AR')}</td><td class="text-end">${fmt$(Math.round(b.rev))}</td><td class="text-end">${b.tickets ? fmt$(Math.round(b.rev / b.tickets)) : '—'}</td><td class="text-end ${delta == null ? 'text-muted' : delta >= 0 ? 'text-success' : 'text-danger'}">${delta == null ? '—' : (delta >= 0 ? '+' : '') + delta.toFixed(1) + '%'}</td></tr>`;
+                // Mes completo: vs mes anterior completo. Mes en curso: vs mismo período (1–hoy) del mes anterior.
+                const prev = i > 0 ? (cur ? d.byMonth[i-1].ticketsToDay : d.byMonth[i-1].tickets) : 0;
+                const delta = prev > 0 ? ((b.tickets - prev) / prev) * 100 : null;
+                return `<tr class="${cur ? 'table-active fw-semibold' : ''}"><td>${monthLabel(b.y, b.m)}${cur ? ' <span class="text-muted fw-normal">(1–' + d.today + ')</span>' : ''}</td><td class="text-end">${b.tickets.toLocaleString('es-AR')}</td><td class="text-end">${fmt$(Math.round(b.rev))}</td><td class="text-end">${b.tickets ? fmt$(Math.round(b.rev / b.tickets)) : '—'}</td><td class="text-end ${delta == null ? 'text-muted' : delta >= 0 ? 'text-success' : 'text-danger'}">${delta == null ? '—' : (delta >= 0 ? '+' : '') + delta.toFixed(1) + '%'}${cur && delta != null ? ' <span class="text-muted fw-normal" title="comparado con ' + monthLabel(d.byMonth[i-1].y, d.byMonth[i-1].m) + ' 1–' + d.today + ' (' + prev.toLocaleString('es-AR') + ' pedidos)">*</span>' : ''}</td></tr>`;
               }).join('')}</tbody>
             </table>
           </div>
@@ -3498,7 +3499,9 @@ function renderMetrics(locId) {
   const tkData = hrs.map(h => d.byHour[h].tickets);
   if (__metricsChart) { __metricsChart.destroy(); __metricsChart = null; }
   if (__metricsMonthChart) { __metricsMonthChart.destroy(); __metricsMonthChart = null; }
-  // gráfico de pedidos por mes
+  // gráfico de pedidos por mes: el eje arranca cerca del mínimo (meses sin datos no cuentan) para que se note la diferencia
+  const monthVals = d.byMonth.map(b => b.tickets).filter(v => v > 0);
+  const monthMin = monthVals.length ? Math.max(0, Math.floor(Math.min(...monthVals) * 0.85 / 100) * 100) : 0;
   const mctx = document.getElementById('metrics-month-chart');
   __metricsMonthChart = new Chart(mctx, {
     type: 'bar',
@@ -3510,7 +3513,7 @@ function renderMetrics(locId) {
     options: {
       responsive: true, maintainAspectRatio: true,
       plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => 'Pedidos: ' + c.parsed.y.toLocaleString('es-AR') } } },
-      scales: { y: { beginAtZero: true, ticks: { callback: v => v.toLocaleString('es-AR') } } }
+      scales: { y: { beginAtZero: false, suggestedMin: monthMin, ticks: { callback: v => v.toLocaleString('es-AR') } } }
     }
   });
   const ctx = document.getElementById('metrics-hour-chart');
