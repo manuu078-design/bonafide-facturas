@@ -3438,6 +3438,8 @@ let __metricsMonthChart = null;
 
 function renderMetrics(locId) {
   const d = __metricsCache[locId]; if (!d) return;
+  // meses anteriores al inicio de datos en Nucleo (0 pedidos) no se muestran
+  d.byMonth = d.byMonth.filter((b, i) => b.tickets > 0 || i === d.byMonth.length - 1);
   const body = document.getElementById('metrics-body');
   const momCard = () => {
     if (d.mom == null) return `<div class="fs-3 fw-bold text-muted">—</div><div class="small text-muted">Sin ventas el mes pasado para comparar</div>`;
@@ -3512,7 +3514,7 @@ function renderMetrics(locId) {
     options: {
       responsive: true, maintainAspectRatio: true,
       plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => 'Pedidos: ' + c.parsed.y.toLocaleString('es-AR') } } },
-      scales: { y: { beginAtZero: false, suggestedMin: monthMin, ticks: { callback: v => v.toLocaleString('es-AR') } } }
+      scales: { y: { beginAtZero: false, min: monthMin, ticks: { callback: v => v.toLocaleString('es-AR') } } }
     }
   });
   const ctx = document.getElementById('metrics-hour-chart');
