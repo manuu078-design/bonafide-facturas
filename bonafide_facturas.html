@@ -3450,6 +3450,8 @@ async function loadMetrics(locId) {
       if (L.y === y && L.m === m) { byHour[L.h].rev += tot; byHour[L.h].tickets += 1; revMonth += tot; ticketsMonth++; }
       else if (L.y === lastY && L.m === lastM) { revLastFull += tot; if (L.day <= today) revLastSame += tot; }
     }
+    // mes completo: se compara contra el mes anterior completo (no cortado al mismo día)
+    if (!mm.isCurrent) revLastSame = revLastFull;
     const mom = revLastSame > 0 ? ((revMonth - revLastSame) / revLastSame) * 100 : null;
 
     __metricsCache[cacheKey] = { byHour, byMonth, top3g: top3(golosinas), top3c: top3(cafeGrano), top3b: top3(bebidasCafe), revMonth, ticketsMonth, revLastSame, revLastFull, mom, today, y, m, isCurrent: mm.isCurrent };
@@ -3492,7 +3494,7 @@ function renderMetrics(locId, cacheKey) {
     return `<div class="fs-2 fw-bold ${up?'text-success':'text-danger'}"><i class="bi bi-arrow-${up?'up':'down'}-right"></i> ${up?'+':''}${d.mom.toFixed(1)}%</div>
       <div class="small text-muted">vs ${d.isCurrent ? 'mismo período del mes anterior (1–' + d.today + ')' : 'mes anterior completo'}</div>
       <div class="small text-muted mt-1">${mesTxt}: <b>${fmt$(d.revMonth)}</b> · Mes anterior${d.isCurrent ? ' 1–' + d.today : ''}: ${fmt$(d.revLastSame)}</div>
-      <div class="small text-muted">Mes pasado completo: ${fmt$(d.revLastFull)}</div>`;
+      ${d.isCurrent ? `<div class="small text-muted">Mes anterior completo: ${fmt$(d.revLastFull)}</div>` : ''}`;
   };
   const topList = (arr, unit) => arr.length ? arr.map((x,i) => `
       <div class="d-flex justify-content-between align-items-center py-1 ${i<arr.length-1?'border-bottom':''}">
