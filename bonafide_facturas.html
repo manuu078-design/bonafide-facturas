@@ -219,7 +219,10 @@
 <div id="page-metrics" class="page">
   <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
     <h4 class="fw-bold mb-0"><i class="bi bi-graph-up text-muted me-2"></i>Métricas <span class="small text-muted fw-normal" id="metrics-period"></span></h4>
-    <div id="metrics-locs" class="d-flex gap-2 flex-wrap"></div>
+    <div class="d-flex gap-2 flex-wrap align-items-center">
+      <select id="metrics-month" class="form-select form-select-sm w-auto" title="Mes a analizar" onchange="onMetricsMonthChange(this.value)"></select>
+      <div id="metrics-locs" class="d-flex gap-2 flex-wrap"></div>
+    </div>
   </div>
   <div id="metrics-body"><div class="text-muted">Elegí un local arriba.</div></div>
 </div>
@@ -3302,8 +3305,43 @@ function deleteInvoice(invId) {
 // MÉTRICAS
 // ═══════════════════════════════════════════════════════════════════════
 let currentMetricsLocId = null;
+let currentMetricsMonth = null;   // {y, m} del mes elegido en el filtro (null = mes en curso)
 let __metricsChart = null;
 const __metricsCache = {};
+const MESES_LARGO = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+
+// Mes seleccionado (por defecto el actual) y si es el mes en curso
+function metricsMonth() {
+  const now = new Date();
+  const sel = currentMetricsMonth || { y: now.getFullYear(), m: now.getMonth() };
+  const isCurrent = sel.y === now.getFullYear() && sel.m === now.getMonth();
+  const daysInMonth = new Date(sel.y, sel.m + 1, 0).getDate();
+  return { y: sel.y, m: sel.m, isCurrent, lastDay: isCurrent ? now.getDate() : daysInMonth };
+}
+
+function renderMetricsMonthSelect() {
+  const sel = document.getElementById('metrics-month'); if (!sel) return;
+  const now = new Date(); const cur = metricsMonth();
+  const opts = [];
+  for (let k = 0; k < 12; k++) {
+    const d = new Date(now.getFullYear(), now.getMonth() - k, 1);
+    const v = d.getFullYear() + '-' + d.getMonth();
+    opts.push(`<option value="${v}" ${d.getFullYear()===cur.y && d.getMonth()===cur.m ? 'selected' : ''}>${MESES_LARGO[d.getMonth()]} ${d.getFullYear()}${k===0?' (en curso)':''}</option>`);
+  }
+  sel.innerHTML = opts.join('');
+}
+
+function onMetricsMonthChange(v) {
+  const [y, m] = v.split('-').map(Number);
+  currentMetricsMonth = { y, m };
+  renderMetricsPeriodLabel();
+  if (currentMetricsLocId) loadMetrics(currentMetricsLocId);
+}
+
+function renderMetricsPeriodLabel() {
+  const mm = metricsMonth();
+  document.getElementById('metrics-period').textContent = '· ' + MESES_LARGO[mm.m] + ' ' + mm.y + (mm.isCurrent ? ' (al día ' + mm.lastDay + ')' : ' (mes completo)');
+}
 
 function renderMetricsPage() {
   const bar = document.getElementById('metrics-locs');
@@ -3312,9 +3350,8 @@ function renderMetricsPage() {
   bar.innerHTML = locs.map(l =>
     `<button class="btn btn-sm ${l.id===currentMetricsLocId?'btn-primary':'btn-outline-primary'}" onclick="loadMetrics(${l.id})">${esc(l.name)}</button>`
   ).join('');
-  const now = new Date();
-  const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
-  document.getElementById('metrics-period').textContent = '· ' + meses[now.getMonth()] + ' ' + now.getFullYear() + ' (al día ' + now.getDate() + ')';
+  renderMetricsMonthSelect();
+  renderMetricsPeriodLabel();
   if (currentMetricsLocId) loadMetrics(currentMetricsLocId);
 }
 
@@ -3330,16 +3367,19 @@ async function loadMetrics(locId) {
   ).join('');
   const body = document.getElementById('metrics-body');
   const loc = state.locations.find(l => l.id === locId);
+  renderMetricsPeriodLabel();
   body.innerHTML = `<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>
-    Calculando métricas de ${esc(loc.name)}... <span id="metrics-progress"></span>
+    Calculando métricas de ${esc(loc.name)} · ${MESES_LARGO[metricsMonth().m]}... <span id="metrics-progress"></span>
     <div class="small mt-1">Lee ventas del mes y clasifica productos; la primera vez tarda ~30-60 s.</div></div>`;
   try {
     const jwt = await getValidJwt(loc);
-    const now = new Date();
-    const y = now.getFullYear(), m = now.getMonth();
+    const mm = metricsMonth();
+    const y = mm.y, m = mm.m;
+    const cacheKey = locId + '-' + y + '-' + m;
     // límites en ART (UTC-3) → StartDate/EndDate en UTC para el stat de ventas
     const monthStartUTC = new Date(Date.UTC(y, m, 1, 3, 0, 0)).toUTCString();
-    const nowUTC = new Date(Date.now() + 60000).toUTCString();
+    // mes en curso: hasta ahora; mes pasado: hasta el fin de ese mes
+    const nowUTC = mm.isCurrent ? new Date(Date.now() + 60000).toUTCString() : new Date(Date.UTC(y, m + 1, 1, 3, 0, 0)).toUTCString();
     const lastY = m === 0 ? y - 1 : y, lastM = m === 0 ? 11 : m - 1;
     const lastStartUTC = new Date(Date.UTC(lastY, lastM, 1, 3, 0, 0)).toUTCString();
     const lastEndUTC   = new Date(Date.UTC(y, m, 1, 3, 0, 0)).toUTCString();
@@ -3397,7 +3437,7 @@ async function loadMetrics(locId) {
       return { y: d.getUTCFullYear(), m: d.getUTCMonth(), day: d.getUTCDate(), h: d.getUTCHours() };
     };
     const byHour = {}; for (let h = 0; h < 24; h++) byHour[h] = { rev: 0, tickets: 0 };
-    const today = now.getDate();
+    const today = mm.lastDay;
     let revMonth = 0, ticketsMonth = 0, revLastSame = 0, revLastFull = 0;
     // Pedidos y ventas por mes (últimos 6 meses)
     const byMonth = [];
@@ -3412,8 +3452,8 @@ async function loadMetrics(locId) {
     }
     const mom = revLastSame > 0 ? ((revMonth - revLastSame) / revLastSame) * 100 : null;
 
-    __metricsCache[locId] = { byHour, byMonth, top3g: top3(golosinas), top3c: top3(cafeGrano), top3b: top3(bebidasCafe), revMonth, ticketsMonth, revLastSame, revLastFull, mom, today };
-    renderMetrics(locId);
+    __metricsCache[cacheKey] = { byHour, byMonth, top3g: top3(golosinas), top3c: top3(cafeGrano), top3b: top3(bebidasCafe), revMonth, ticketsMonth, revLastSame, revLastFull, mom, today, y, m, isCurrent: mm.isCurrent };
+    renderMetrics(locId, cacheKey);
   } catch (e) {
     body.innerHTML = `<div class="alert alert-danger">Error: ${esc(e.message)}</div>`;
   }
@@ -3436,8 +3476,13 @@ const MONTH_NAMES_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','O
 function monthLabel(y, m) { return MONTH_NAMES_ES[m] + ' ' + String(y).slice(2); }
 let __metricsMonthChart = null;
 
-function renderMetrics(locId) {
-  const d = __metricsCache[locId]; if (!d) return;
+function renderMetrics(locId, cacheKey) {
+  const d = __metricsCache[cacheKey || locId]; if (!d) return;
+  // si el usuario cambió de local o de mes mientras cargaba, no pisar la vista
+  const mmNow = metricsMonth();
+  if (locId !== currentMetricsLocId || d.y !== mmNow.y || d.m !== mmNow.m) return;
+  const mesTxt = MESES_LARGO[d.m] + ' ' + d.y;
+  const periodoTxt = d.isCurrent ? '(1–' + d.today + ')' : '(mes completo)';
   // meses anteriores al inicio de datos en Nucleo (0 pedidos) no se muestran
   d.byMonth = d.byMonth.filter((b, i) => b.tickets > 0 || i === d.byMonth.length - 1);
   const body = document.getElementById('metrics-body');
@@ -3445,28 +3490,28 @@ function renderMetrics(locId) {
     if (d.mom == null) return `<div class="fs-3 fw-bold text-muted">—</div><div class="small text-muted">Sin ventas el mes pasado para comparar</div>`;
     const up = d.mom >= 0;
     return `<div class="fs-2 fw-bold ${up?'text-success':'text-danger'}"><i class="bi bi-arrow-${up?'up':'down'}-right"></i> ${up?'+':''}${d.mom.toFixed(1)}%</div>
-      <div class="small text-muted">vs mismo período mes pasado (1–${d.today})</div>
-      <div class="small text-muted mt-1">Este mes: <b>${fmt$(d.revMonth)}</b> · Mes pasado 1–${d.today}: ${fmt$(d.revLastSame)}</div>
+      <div class="small text-muted">vs ${d.isCurrent ? 'mismo período del mes anterior (1–' + d.today + ')' : 'mes anterior completo'}</div>
+      <div class="small text-muted mt-1">${mesTxt}: <b>${fmt$(d.revMonth)}</b> · Mes anterior${d.isCurrent ? ' 1–' + d.today : ''}: ${fmt$(d.revLastSame)}</div>
       <div class="small text-muted">Mes pasado completo: ${fmt$(d.revLastFull)}</div>`;
   };
   const topList = (arr, unit) => arr.length ? arr.map((x,i) => `
       <div class="d-flex justify-content-between align-items-center py-1 ${i<arr.length-1?'border-bottom':''}">
         <div><span class="badge ${i===0?'bg-warning text-dark':i===1?'bg-secondary':'bg-light text-dark border'} me-2">${i+1}</span>${esc(x.name)}</div>
         <div class="fw-semibold text-nowrap">${Math.round(x.q).toLocaleString('es-AR')} ${unit}</div>
-      </div>`).join('') : '<div class="small text-muted py-2">Sin ventas registradas este mes.</div>';
+      </div>`).join('') : '<div class="small text-muted py-2">Sin ventas registradas en ' + mesTxt + '.</div>';
 
   body.innerHTML = `
     <div class="row g-3 mb-3">
-      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ventas del mes</div>${momCard()}</div></div>
-      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ventas del mes <span title="Todos los pedidos, facturados o no">(pedidos)</span></div><div class="fs-2 fw-bold">${fmt$(d.revMonth)}</div><div class="small text-muted">${d.ticketsMonth.toLocaleString('es-AR')} pedidos</div></div></div>
+      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ventas de ${mesTxt}</div>${momCard()}</div></div>
+      <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ventas de ${mesTxt} <span title="Todos los pedidos, facturados o no">(pedidos)</span></div><div class="fs-2 fw-bold">${fmt$(d.revMonth)}</div><div class="small text-muted">${d.ticketsMonth.toLocaleString('es-AR')} pedidos</div></div></div>
       <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ticket promedio</div><div class="fs-2 fw-bold">${d.ticketsMonth?fmt$(Math.round(d.revMonth/d.ticketsMonth)):'—'}</div><div class="small text-muted">promedio por pedido</div></div></div>
     </div>
     <div class="card mb-3">
-      <div class="card-header bg-transparent fw-semibold"><i class="bi bi-clock-history me-2"></i>Consumo por hora <span class="small text-muted fw-normal">— barras: ventas ($) · línea: pedidos</span></div>
+      <div class="card-header bg-transparent fw-semibold"><i class="bi bi-clock-history me-2"></i>Consumo por hora <span class="small text-muted fw-normal">— ${mesTxt} ${periodoTxt} · barras: ventas ($) · línea: pedidos</span></div>
       <div class="card-body"><canvas id="metrics-hour-chart" height="90"></canvas></div>
     </div>
     <div class="card mb-3">
-      <div class="card-header bg-transparent fw-semibold"><i class="bi bi-receipt me-2"></i>Cantidad de pedidos por mes <span class="small text-muted fw-normal">— últimos ${d.byMonth.length} meses (el mes en curso va hasta hoy)</span></div>
+      <div class="card-header bg-transparent fw-semibold"><i class="bi bi-receipt me-2"></i>Cantidad de pedidos por mes <span class="small text-muted fw-normal">— ${d.byMonth.length} meses hasta ${mesTxt}${d.isCurrent ? ' (el mes en curso va hasta hoy)' : ''}</span></div>
       <div class="card-body">
         <div class="row g-3 align-items-center">
           <div class="col-lg-7"><canvas id="metrics-month-chart" height="110"></canvas></div>
@@ -3477,7 +3522,7 @@ function renderMetrics(locId) {
                 const prev = i > 0 ? d.byMonth[i-1].tickets : 0;
                 const delta = prev > 0 ? ((b.tickets - prev) / prev) * 100 : null;
                 const cur = i === d.byMonth.length - 1;
-                return `<tr class="${cur ? 'table-active fw-semibold' : ''}"><td>${monthLabel(b.y, b.m)}${cur ? ' <span class="text-muted fw-normal">(1–' + d.today + ')</span>' : ''}</td><td class="text-end">${b.tickets.toLocaleString('es-AR')}</td><td class="text-end">${fmt$(Math.round(b.rev))}</td><td class="text-end">${b.tickets ? fmt$(Math.round(b.rev / b.tickets)) : '—'}</td><td class="text-end ${delta == null ? 'text-muted' : delta >= 0 ? 'text-success' : 'text-danger'}">${delta == null ? '—' : (delta >= 0 ? '+' : '') + delta.toFixed(1) + '%'}</td></tr>`;
+                return `<tr class="${cur ? 'table-active fw-semibold' : ''}"><td>${monthLabel(b.y, b.m)}${cur && d.isCurrent ? ' <span class="text-muted fw-normal">(1–' + d.today + ')</span>' : ''}</td><td class="text-end">${b.tickets.toLocaleString('es-AR')}</td><td class="text-end">${fmt$(Math.round(b.rev))}</td><td class="text-end">${b.tickets ? fmt$(Math.round(b.rev / b.tickets)) : '—'}</td><td class="text-end ${delta == null ? 'text-muted' : delta >= 0 ? 'text-success' : 'text-danger'}">${delta == null ? '—' : (delta >= 0 ? '+' : '') + delta.toFixed(1) + '%'}</td></tr>`;
               }).join('')}</tbody>
             </table>
           </div>
@@ -3485,11 +3530,11 @@ function renderMetrics(locId) {
       </div>
     </div>
     <div class="row g-3">
-      <div class="col-md-4"><div class="card h-100"><div class="card-header bg-transparent fw-semibold">🍫 Top 3 golosinas <span class="small text-muted fw-normal">(rubro Almacén)</span></div><div class="card-body">${topList(d.top3g,'u')}</div></div></div>
+      <div class="col-md-4"><div class="card h-100"><div class="card-header bg-transparent fw-semibold">🍫 Top 3 golosinas <span class="small text-muted fw-normal">(rubro Almacén · ${mesTxt})</span></div><div class="card-body">${topList(d.top3g,'u')}</div></div></div>
       <div class="col-md-4"><div class="card h-100"><div class="card-header bg-transparent fw-semibold">☕ Top 3 café en grano</div><div class="card-body">${topList(d.top3c,'u')}</div></div></div>
       <div class="col-md-4"><div class="card h-100"><div class="card-header bg-transparent fw-semibold">🥤 Top 3 bebidas de café</div><div class="card-body">${topList(d.top3b,'u')}</div></div></div>
     </div>
-    <p class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Datos del mes en curso desde Nucleo (ventas por producto y comprobantes por hora). Golosinas = rubro Almacén; café en grano/bebidas se clasifican por la receta de café de cada producto.</p>`;
+    <p class="small text-muted mt-2"><i class="bi bi-info-circle me-1"></i>Datos de ${mesTxt} ${periodoTxt} desde Nucleo (ventas por producto y comprobantes por hora). Golosinas = rubro Almacén; café en grano/bebidas se clasifican por la receta de café de cada producto.</p>`;
 
   // gráfico combo
   const hoursActive = [];
