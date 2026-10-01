@@ -3474,6 +3474,27 @@ async function ordersRange(jwt, from, to) {
   return Array.isArray(r.data) ? r.data : (r.data && (r.data.Data || r.data.Orders || r.data.Items)) || [];
 }
 
+// ── IPC INDEC (variación mensual %, nivel general nacional). Clave 'AAAA-M' (mes 1-12).
+//    Valores publicados por el INDEC; los meses nuevos se cargan desde la app (quedan en state.ipc).
+const IPC_INDEC_BASE = {
+  '2026-1': 2.9, '2026-2': 2.9, '2026-3': 3.4, '2026-4': 2.6, '2026-5': 2.1, '2026-6': 1.9, '2026-7': 2.1, '2026-8': 1.7
+};
+function ipcOf(y, m) {   // m: 0-11
+  const k = y + '-' + (m + 1);
+  const o = (state.ipc || {})[k];
+  if (o != null && o !== '') return Number(o);
+  return IPC_INDEC_BASE[k] != null ? IPC_INDEC_BASE[k] : null;
+}
+function editIpc(y, m) {
+  const cur = ipcOf(y, m);
+  const v = prompt(`IPC INDEC de ${MESES_LARGO[m]} ${y} (variación mensual, en %):`, cur != null ? String(cur).replace('.', ',') : '');
+  if (v == null) return;
+  const n = parseFloat(String(v).replace(',', '.'));
+  if (isNaN(n)) { showToast('Valor inválido. Ejemplo: 1,7', 'warning'); return; }
+  state.ipc = state.ipc || {}; state.ipc[y + '-' + (m + 1)] = n; saveState();
+  showToast(`IPC de ${MESES_LARGO[m]} ${y} guardado: ${n}%`, 'success');
+  if (currentMetricsLocId) { const mm = metricsMonth(); renderMetrics(currentMetricsLocId, currentMetricsLocId + '-' + mm.y + '-' + mm.m); }
+}
 const MONTH_NAMES_ES = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
 function monthLabel(y, m) { return MONTH_NAMES_ES[m] + ' ' + String(y).slice(2); }
 let __metricsMonthChart = null;
@@ -3502,6 +3523,39 @@ function renderMetrics(locId, cacheKey) {
         <div class="fw-semibold text-nowrap">${Math.round(x.q).toLocaleString('es-AR')} ${unit}</div>
       </div>`).join('') : '<div class="small text-muted py-2">Sin ventas registradas en ' + mesTxt + '.</div>';
 
+  const pct = (v, dec) => (v >= 0 ? '+' : '') + v.toFixed(dec == null ? 1 : dec) + '%';
+  const realGrowthHtml = () => {
+    const rows = [];
+    for (let i = 1; i < d.byMonth.length; i++) {
+      const b = d.byMonth[i], prev = d.byMonth[i-1];
+      const cur = i === d.byMonth.length - 1;
+      // mes en curso: se compara contra el mismo período (1–hoy) del mes anterior
+      const base = (cur && d.isCurrent) ? d.revLastSame : prev.rev;
+      const nom = base > 0 ? (b.rev / base - 1) * 100 : null;
+      const ipc = ipcOf(b.y, b.m);
+      const real = (nom != null && ipc != null) ? ((1 + nom/100) / (1 + ipc/100) - 1) * 100 : null;
+      rows.push({ b, cur, nom, ipc, real });
+    }
+    if (!rows.length) return '<div class="small text-muted">Hacen falta al menos dos meses con ventas.</div>';
+    const last = rows[rows.length - 1];
+    const head = last.real == null
+      ? `<div class="mb-3"><div class="fs-3 fw-bold text-muted">—</div><div class="small text-muted">${last.ipc == null ? 'El INDEC todavía no publicó el IPC de ' + MESES_LARGO[last.b.m] + ' ' + last.b.y + ' · <a href="#" onclick="editIpc(' + last.b.y + ',' + last.b.m + ');return false;">cargarlo</a>' : 'Sin ventas del mes anterior para comparar'}</div></div>`
+      : `<div class="mb-3 d-flex flex-wrap gap-4 align-items-end">
+           <div><div class="small text-muted">Crecimiento real · ${MESES_LARGO[last.b.m]} ${last.b.y}${last.cur && d.isCurrent ? ' (1–' + d.today + ')' : ''}</div>
+             <div class="fs-2 fw-bold ${last.real >= 0 ? 'text-success' : 'text-danger'}"><i class="bi bi-arrow-${last.real >= 0 ? 'up' : 'down'}-right"></i> ${pct(last.real)}</div></div>
+           <div class="small text-muted pb-2">Ventas ${pct(last.nom)} nominal · IPC ${last.ipc.toFixed(1).replace('.', ',')}% → ${last.real >= 0 ? 'le ganaste' : 'perdiste contra'} la inflación por ${Math.abs(last.real).toFixed(1).replace('.', ',')} puntos</div>
+         </div>`;
+    const table = `<table class="table table-sm mb-0 small align-middle">
+      <thead><tr><th>Mes</th><th class="text-end">Ventas</th><th class="text-end">Δ ventas (nominal)</th><th class="text-end">IPC INDEC</th><th class="text-end">Δ real</th><th>Lectura</th></tr></thead>
+      <tbody>${rows.map(r => {
+        const ipcCell = `<a href="#" class="text-decoration-none ${r.ipc == null ? 'text-warning' : ''}" title="Click para cargar/corregir" onclick="editIpc(${r.b.y},${r.b.m});return false;">${r.ipc == null ? 'cargar' : r.ipc.toFixed(1).replace('.', ',') + '%'}</a>`;
+        const cls = r.real == null ? 'text-muted' : r.real >= 0 ? 'text-success' : 'text-danger';
+        const lectura = r.real == null ? '—' : r.real >= 1 ? 'crecimiento real' : r.real <= -1 ? 'caída real' : 'empate con la inflación';
+        return `<tr class="${r.cur ? 'table-active fw-semibold' : ''}"><td>${monthLabel(r.b.y, r.b.m)}${r.cur && d.isCurrent ? ' <span class="text-muted fw-normal">(1–' + d.today + ' vs mismo período)</span>' : ''}</td><td class="text-end">${fmt$(Math.round(r.b.rev))}</td><td class="text-end ${r.nom == null ? 'text-muted' : r.nom >= 0 ? 'text-success' : 'text-danger'}">${r.nom == null ? '—' : pct(r.nom)}</td><td class="text-end">${ipcCell}</td><td class="text-end ${cls}">${r.real == null ? '—' : pct(r.real)}</td><td class="${cls}">${lectura}</td></tr>`;
+      }).join('')}</tbody></table>`;
+    return head + table;
+  };
+
   body.innerHTML = `
     <div class="row g-3 mb-3">
       <div class="col-md-4"><div class="card p-3 text-center h-100"><div class="small text-muted mb-1">Ventas de ${mesTxt}</div>${momCard()}</div></div>
@@ -3529,6 +3583,16 @@ function renderMetrics(locId, cacheKey) {
             </table>
           </div>
         </div>
+      </div>
+    </div>
+    <div class="card mb-3">
+      <div class="card-header bg-transparent fw-semibold d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span><i class="bi bi-graph-up-arrow me-2"></i>Crecimiento real de ventas <span class="small text-muted fw-normal">— variación mes a mes vs. inflación (IPC INDEC)</span></span>
+        <span class="small text-muted fw-normal">Δ real = (1 + Δ ventas) ÷ (1 + IPC) − 1</span>
+      </div>
+      <div class="card-body">
+        ${realGrowthHtml()}
+        <div class="small text-muted mt-2">IPC = variación mensual del nivel general nacional publicada por el INDEC (se difunde a mitad del mes siguiente). Hacé click en un valor de IPC para cargarlo o corregirlo.</div>
       </div>
     </div>
     <div class="row g-3">
