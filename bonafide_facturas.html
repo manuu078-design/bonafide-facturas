@@ -583,7 +583,6 @@ async function syncStateFromServer() {
   } catch (e) {}
 }
 loadState();
-ensureJardinLoc();
 
 // ── Mapeos POR LOCAL ─────────────────────────────────────────────────────
 // Cada local tiene su propia base de ingredientes en Nucleo (IDs distintos),
@@ -3906,6 +3905,7 @@ function showPage(name, param) {
 }
 
 function populateLocationDropdowns() {
+  ensureJardinLoc();
   ['upload-location'].forEach(id => {
     const sel = document.getElementById(id);
     if (!sel) return;
