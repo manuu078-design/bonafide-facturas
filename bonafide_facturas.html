@@ -2562,8 +2562,8 @@ async function loadTransferIngs() {
     const prods = [];
     for (const comp of Object.keys(inv)) for (const p of Object.values(inv[comp])) if (p.qty > 0.001) prods.push({ ...p, comp });
     window.__trJardinProds = prods;
-    dl.innerHTML = prods.map(p => `<option value="${esc(p.desc)}">${esc(p.comp)} · ${p.qty} ${esc(p.unit)}</option>`).join('');
-    st.innerHTML = '<span class="text-muted">Origen Jardín: la cantidad va en <strong>bultos</strong> (como figura en la factura). Se descuenta de la empresa dueña del local de destino.</span>';
+    dl.innerHTML = prods.map(p => `<option value="${esc(p.desc)}">${esc(p.comp)} · ${p.qty.toLocaleString('es-AR')} unidades</option>`).join('');
+    st.innerHTML = '<span class="text-muted">Origen Jardín: la cantidad va en <strong>unidades de producto</strong>. Se descuenta de la empresa dueña del local de destino y se suma al stock del local en Nucleo.</span>';
     return;
   }
   st.textContent = 'Cargando ingredientes del origen...';
@@ -3035,23 +3035,29 @@ function jardinKey(code, desc) { return (code || '').trim() ? 'c:' + String(code
 // Inventario de Jardín por empresa: { 'UN CORTADO SA': { key: {code, desc, unit, qty, lastIn} }, ... }
 async function jardinInventory() {
   const inv = { 'UN CORTADO SA': {}, 'DE LOS CAFE SA': {} };
-  const bump = (comp, code, desc, unit, qty, date) => {
+  // qty = UNIDADES de producto (columna "Cant. stock" de la factura; si no se cargó, bultos × unidades por bulto según la descripción)
+  const bump = (comp, code, desc, qty, bultos, date) => {
     if (!inv[comp]) inv[comp] = {};
     const k = jardinKey(code, desc);
-    const p = inv[comp][k] || (inv[comp][k] = { code: code || '', desc: desc || '', unit: unit || 'CAJ', qty: 0, lastIn: '' });
+    const p = inv[comp][k] || (inv[comp][k] = { code: code || '', desc: desc || '', unit: 'u', qty: 0, bultos: 0, lastIn: '' });
     p.qty = Math.round((p.qty + qty) * 1000) / 1000;
+    p.bultos = Math.round((p.bultos + (bultos || 0)) * 1000) / 1000;
     if (qty > 0 && date && date > p.lastIn) p.lastIn = date;
     if (!p.code && code) p.code = code;
   };
   for (const f of (state.invoices || [])) {
     if (!isJardin(f.locId) || f.status !== 'done' || !f.company) continue;
-    for (const it of (f.items || [])) if (it.quantity > 0) bump(f.company, it.code, it.description, it.unit, it.quantity, parseARDate(f.date) ? parseARDate(f.date).toISOString().slice(0,10) : '');
+    for (const it of (f.items || [])) {
+      if (!(it.quantity > 0)) continue;
+      const units = it.stockQty > 0 ? it.stockQty : it.quantity * (suggestPerBulto(it.description, 'Unidad') || 1);
+      bump(f.company, it.code, it.description, units, it.quantity, parseARDate(f.date) ? parseARDate(f.date).toISOString().slice(0,10) : '');
+    }
   }
   let transfers = window.__transfers;
   if (!transfers) { try { transfers = await (await fetch('/api/transfers')).json(); window.__transfers = transfers; } catch (e) { transfers = []; } }
   for (const t of transfers) {
     if (t.tipo !== 'jardin' || !t.company) continue;
-    for (const i of (t.items || [])) if (i.ok !== false) bump(t.company, i.code, i.name, i.unit, -i.qty, '');
+    for (const i of (t.items || [])) if (i.ok !== false) bump(t.company, i.code, i.name, -i.qty, 0, '');
   }
   return inv;
 }
@@ -3068,8 +3074,9 @@ function renderJardinPanel(inv, panel) {
   const n = (inv.items || []).filter(it => it.quantity > 0).length;
   panel.innerHTML = `<p class="small text-muted mb-2"><i class="bi bi-box-seam me-1"></i>
       Jardín no está en Nucleo: esta factura <strong>no genera orden de compra</strong>. Al confirmar, los ${n} artículos
-      (en bultos, como figuran en la factura) quedan en el stock de Jardín de <strong>${esc(inv.company || '— elegí la empresa —')}</strong>
-      y la factura cuenta como gasto de esa empresa.</p>
+      quedan en el stock de Jardín de <strong>${esc(inv.company || '— elegí la empresa —')}</strong>
+      y la factura cuenta como gasto de esa empresa. El stock se lleva en <strong>unidades de producto</strong>: completá la columna
+      "Cant. stock" con las unidades que trae cada renglón (bultos × unidades por bulto); si la dejás vacía se calcula desde la descripción.</p>
     <button class="btn w-100 text-white" style="background:#1a1a2e" onclick="confirmJardinIn(${inv.id})" ${inv.company ? '' : 'disabled'}>
       <i class="bi bi-box-arrow-in-down me-1"></i>Ingresar a Jardín</button>`;
 }
@@ -3096,21 +3103,21 @@ async function renderJardinStock(body) {
   const inv = await jardinInventory();
   const block = comp => {
     const rows = Object.values(inv[comp] || {}).filter(p => Math.abs(p.qty) > 0.001).sort((a,b) => a.desc.localeCompare(b.desc));
-    const bultos = rows.reduce((s,p) => s + p.qty, 0);
+    const unidades = rows.reduce((s,p) => s + p.qty, 0);
     return `<div class="card mb-3"><div class="card-header fw-semibold d-flex justify-content-between align-items-center" style="background:${comp==='UN CORTADO SA'?'#eef3ff':'#fff4e5'}">
         <span><i class="bi bi-building me-2"></i>${esc(comp)}</span>
-        <span class="small text-muted fw-normal">${rows.length} productos · ${Math.round(bultos*100)/100} bultos</span></div>
+        <span class="small text-muted fw-normal">${rows.length} productos · ${Math.round(unidades).toLocaleString('es-AR')} unidades</span></div>
       <div class="card-body p-0">${rows.length ? `<table class="table table-sm table-hover mb-0">
-        <thead class="table-light"><tr><th class="ps-3">Código</th><th>Producto</th><th class="text-end">Cantidad</th><th>Unidad</th><th class="pe-3">Último ingreso</th></tr></thead>
+        <thead class="table-light"><tr><th class="ps-3">Código</th><th>Producto</th><th class="text-end">Unidades</th><th class="text-end">Bultos ingresados</th><th class="pe-3">Último ingreso</th></tr></thead>
         <tbody>${rows.map(p => `<tr class="${p.qty < 0 ? 'table-danger' : ''}"><td class="ps-3 font-monospace small">${esc(p.code)}</td><td>${esc(p.desc)}</td>
-          <td class="text-end fw-semibold ${p.qty < 0 ? 'text-danger' : ''}">${p.qty.toLocaleString('es-AR')}</td><td class="small text-muted">${esc(p.unit)}</td>
+          <td class="text-end fw-semibold ${p.qty < 0 ? 'text-danger' : ''}">${p.qty.toLocaleString('es-AR')}</td><td class="text-end small text-muted">${p.bultos ? p.bultos.toLocaleString('es-AR') : '—'}</td>
           <td class="pe-3 small text-muted">${p.lastIn ? p.lastIn.split('-').reverse().join('/') : '—'}</td></tr>`).join('')}</tbody></table>`
         : '<div class="small text-muted p-3">Sin mercadería de esta empresa en Jardín.</div>'}</div></div>`;
   };
   body.innerHTML = `
     <div class="alert alert-light border small py-2 mb-3"><i class="bi bi-box-seam me-1"></i>
       <strong>Jardín</strong> es un depósito compartido y no está en Nucleo. El stock se calcula con las facturas cargadas en Jardín
-      (con su empresa) menos las transferencias desde Jardín hacia los locales. Las cantidades están en <strong>bultos de factura</strong>.</div>
+      (con su empresa) menos las transferencias desde Jardín hacia los locales. Las cantidades están en <strong>unidades de producto</strong> (columna "Cant. stock" de la factura).</div>
     ${block('UN CORTADO SA')}${block('DE LOS CAFE SA')}`;
 }
 
@@ -3136,7 +3143,7 @@ async function submitTransferFromJardin(rows, toId, fecha) {
     for (const it of rows) {
       const p = Object.values(stockComp).find(x => trNorm(x.desc) === trNorm(it.name) || x.desc.toLowerCase() === it.name.toLowerCase());
       if (!p) { errores.push(`"${it.name}" no está en Jardín a nombre de ${comp}`); continue; }
-      if (it.qty > p.qty + 0.001) errores.push(`"${p.desc}": pedís ${it.qty} y hay ${p.qty} ${p.unit} de ${comp} en Jardín`);
+      if (it.qty > p.qty + 0.001) errores.push(`"${p.desc}": pedís ${it.qty} y hay ${p.qty} unidades de ${comp} en Jardín`);
       // ingrediente en el Nucleo del destino: por mapeo del código (con factor bulto→unidad de stock) o por nombre
       const m = p.code ? maps[p.code] : null;
       let iT = m && m.ingId ? ingsT.find(i => i.IngredientId === m.ingId) : null;
@@ -3144,9 +3151,16 @@ async function submitTransferFromJardin(rows, toId, fecha) {
       if (!iT && p.code && byCode[p.code]) iT = ingsT.find(i => i.IngredientId === byCode[p.code]) || null;
       if (!iT) { iT = trFind(ingsT, p.desc); }
       if (!iT) { errores.push(`"${p.desc}" no tiene ingrediente equivalente en ${locT.name} (cargá una factura de ese producto en ${locT.name} para memorizar el mapeo)`); continue; }
-      if (!factor) { const g = suggestPerBulto(p.desc, iT.MeasurementUnitName || ''); factor = g > 0 ? g : null; }
-      if (!factor) { errores.push(`No sé cuántas unidades de stock tiene un bulto de "${p.desc}" en ${locT.name}`); continue; }
-      plan.push({ it, p, iT, factor, stockQty: Math.round(it.qty * factor * 1000) / 1000 });
+      // Jardín lleva unidades de producto: si el ingrediente del local también está en unidades, pasa 1 a 1;
+      // si está en gramos/kg, se convierte con el peso por unidad que figura en la descripción (ej. "6 X 600 GR" → 600 g c/u)
+      const uT = (iT.MeasurementUnitName || '').toUpperCase();
+      let perUnit = 1;
+      if (!/UNID|^UN\b|^UN$/.test(uT)) {
+        const bultoG = suggestPerBulto(p.desc, 'gramos'), bultoU = suggestPerBulto(p.desc, 'Unidad');
+        if (bultoG > 0 && bultoU > 0) perUnit = /^KG|KILO/.test(uT) ? (bultoG / bultoU) / 1000 : bultoG / bultoU;
+        else { errores.push(`"${p.desc}": en ${locT.name} el ingrediente está en ${iT.MeasurementUnitName} y no puedo convertir unidades`); continue; }
+      }
+      plan.push({ it, p, iT, factor: perUnit, stockQty: Math.round(it.qty * perUnit * 1000) / 1000 });
     }
     if (errores.length) {
       st.innerHTML = '<div class="alert alert-warning py-2 small mb-0">' + errores.map(esc).join('<br>') + '<br><strong>No se movió nada.</strong></div>';
@@ -3155,7 +3169,7 @@ async function submitTransferFromJardin(rows, toId, fecha) {
     window.__trPlan = { jardin: true, plan, locT, jwtT, fecha, comp };
     st.innerHTML = `<div class="card border-primary"><div class="card-body p-2">
       <div class="fw-semibold small mb-2"><i class="bi bi-eye me-1"></i>Revisá antes de confirmar (sale de Jardín · ${esc(comp)}):</div>
-      <table class="table table-sm small mb-2"><thead class="table-light"><tr><th>Se descuenta en Jardín</th><th class="text-end">Bultos</th><th>Se suma en ${esc(locT.name)}</th></tr></thead><tbody>
+      <table class="table table-sm small mb-2"><thead class="table-light"><tr><th>Se descuenta en Jardín</th><th class="text-end">Unidades</th><th>Se suma en ${esc(locT.name)}</th></tr></thead><tbody>
       ${plan.map(x => `<tr><td class="text-danger">− ${esc(x.p.desc)}</td><td class="text-end fw-semibold">${x.it.qty}</td>
         <td class="text-primary">+ ${esc(x.iT.IngredientName)} <span class="text-muted">(${x.stockQty.toLocaleString('es-AR')} ${esc(x.iT.MeasurementUnitName||'')})</span></td></tr>`).join('')}
       </tbody></table>
@@ -3184,7 +3198,7 @@ async function confirmTransferFromJardin() {
         r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',body,jwtT); txt = JSON.stringify(r.data);
       }
       const ok = r.status === 200 && !/HasErrors":true/.test(txt);
-      results.push({ code: x.p.code, name: x.p.desc, qty: x.it.qty, unit: x.p.unit, ok, err: ok ? null : txt.slice(0,120) });
+      results.push({ code: x.p.code, name: x.p.desc, qty: x.it.qty, unit: 'u', ok, err: ok ? null : txt.slice(0,120) });
     }
     st.textContent = 'Guardando registro...';
     await fetch('/api/transfer', { method:'POST', headers:{'Content-Type':'application/json'},
