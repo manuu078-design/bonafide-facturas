@@ -257,6 +257,14 @@
             <label class="form-label fw-semibold">Local</label>
             <select id="upload-location" class="form-select" required></select>
           </div>
+          <div class="mb-3 d-none" id="upload-company-wrap">
+            <label class="form-label fw-semibold">Empresa <span class="text-muted fw-normal small">(Jardín es compartido: ¿de quién es la mercadería?)</span></label>
+            <select id="upload-company" class="form-select">
+              <option value="">— Seleccioná la empresa —</option>
+              <option value="UN CORTADO SA">UN CORTADO SA (Palmas, Unicenter, Leloir)</option>
+              <option value="DE LOS CAFE SA">DE LOS CAFE SA (Obligado, Juramento)</option>
+            </select>
+          </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">Proveedor <span class="text-muted fw-normal small">(opcional)</span></label>
             <select id="upload-supplier" class="form-select"></select>
@@ -317,7 +325,15 @@
             </div>
             <div class="col-md-6">
               <label class="form-label small fw-semibold">Local</label>
-              <select id="r-location" class="form-select"></select>
+              <select id="r-location" class="form-select" onchange="toggleCompanyWrap('r-location','r-company-wrap')"></select>
+            </div>
+            <div class="col-md-6 d-none" id="r-company-wrap">
+              <label class="form-label small fw-semibold">Empresa (dueña de la mercadería en Jardín)</label>
+              <select id="r-company" class="form-select">
+                <option value="">— Seleccioná —</option>
+                <option value="UN CORTADO SA">UN CORTADO SA</option>
+                <option value="DE LOS CAFE SA">DE LOS CAFE SA</option>
+              </select>
             </div>
             <div class="col-md-4">
               <label class="form-label small fw-semibold">N° Factura/Remito</label>
@@ -557,6 +573,7 @@ async function syncStateFromServer() {
     if (hasSrv) {
       delete srv._savedTs;
       Object.assign(state, srv);
+      ensureJardinLoc();
       localStorage.setItem('bonafide_state', JSON.stringify(state));
     } else if (hasLocal) {
       // Primera vez: este navegador tiene datos y el servidor no → subirlos.
@@ -566,6 +583,7 @@ async function syncStateFromServer() {
   } catch (e) {}
 }
 loadState();
+ensureJardinLoc();
 
 // ── Mapeos POR LOCAL ─────────────────────────────────────────────────────
 // Cada local tiene su propia base de ingredientes en Nucleo (IDs distintos),
@@ -1081,6 +1099,8 @@ async function processUpload() {
   const locId = parseInt(document.getElementById('upload-location').value);
   const supplier = getUploadSupplier();
   if (!locId) { showToast('Seleccioná un local.', 'warning'); return; }
+  const company = isJardin(locId) ? (document.getElementById('upload-company').value || '') : null;
+  if (isJardin(locId) && !company) { showToast('Jardín es compartido: indicá a qué empresa corresponde la factura.', 'warning'); return; }
   if (!uploadedFile) { showToast('Seleccioná un archivo.', 'warning'); return; }
 
   const btn = document.getElementById('upload-btn');
@@ -1112,7 +1132,7 @@ async function processUpload() {
 
     const inv = {
       id: state.nextId++,
-      locId, supplier: meta.supplier, number: meta.number,
+      locId, company, supplier: meta.supplier, number: meta.number,
       date: meta.date, total: meta.total,
       subtotal: meta.subtotal || 0, iva: meta.iva || 0,
       status: 'pending',
@@ -1160,6 +1180,8 @@ async function renderReview(invId) {
   sel.innerHTML = state.locations.map(l =>
     `<option value="${l.id}" ${l.id===inv.locId?'selected':''}>${l.name}</option>`
   ).join('');
+  document.getElementById('r-company').value = inv.company || '';
+  toggleCompanyWrap('r-location', 'r-company-wrap');
 
   // Foto original (si vino de la bandeja de locales)
   renderReviewPhotos(inv);
@@ -1314,6 +1336,7 @@ function saveCurrentInvoice() {
   inv.date     = document.getElementById('r-date').value;
   inv.total    = parseFloat(document.getElementById('r-total').value) || 0;
   inv.locId    = parseInt(document.getElementById('r-location').value);
+  inv.company  = isJardin(inv.locId) ? (document.getElementById('r-company').value || null) : null;
   inv.items    = getItemsFromTable();
   saveState();
   renderPurchasePanel(inv);
@@ -1399,6 +1422,7 @@ function renderStockPanel(inv) {
 function renderPurchasePanel(inv) {
   const panel = document.getElementById('purchase-panel');
   if (!panel) return;
+  if (isJardin(inv.locId)) { renderJardinPanel(inv, panel); return; }
   const mapped = (inv.items || []).filter(it => it.ingId);
   const sinMapear = (inv.items || []).length - mapped.length;
 
@@ -1872,7 +1896,7 @@ function renderSettings() {
     cont.innerHTML = '<div class="alert alert-info mb-3">No hay locales configurados todavía.</div>';
     return;
   }
-  cont.innerHTML = state.locations.map(loc => `
+  cont.innerHTML = state.locations.filter(loc => !loc.virtual).map(loc => `
     <div class="card mb-3">
       <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
         <h6 class="mb-0 fw-bold"><i class="bi bi-shop me-2 text-primary"></i>${esc(loc.name)}</h6>
@@ -2407,25 +2431,27 @@ async function consumoDesde(loc, jwt, countedAtLocal) {
 const BONAFIDE_ING_RE = /cafe|expres|selecc|superior|franja|cinta|descaf|capsul|saquito|molido|bocadito|mecano|nugaton|chocman|minitorta|taza|rama|mani|man[íi]|vizzio|crispy|amare|donut|loly|moned|60%|estuche|budin/i;
 let currentStockLocId = null;
 
+function stockLocButtons(activeId) {
+  const locs = state.locations.filter(l => l.email || l.virtual);
+  return locs.map(l =>
+    `<button class="btn btn-sm ${l.id===activeId?'btn-primary':'btn-outline-primary'}" onclick="loadStockTable(${l.id})">${l.virtual ? '<i class="bi bi-box-seam me-1"></i>' : ''}${esc(l.name)}</button>`
+  ).join('');
+}
 function renderStockPage() {
+  ensureJardinLoc();
   const bar = document.getElementById('stock-locs');
   if (!bar) return;
-  const locs = state.locations.filter(l => l.email);
-  bar.innerHTML = locs.map(l =>
-    `<button class="btn btn-sm ${l.id===currentStockLocId?'btn-primary':'btn-outline-primary'}" onclick="loadStockTable(${l.id})">${esc(l.name)}</button>`
-  ).join('');
+  bar.innerHTML = stockLocButtons(currentStockLocId);
   if (currentStockLocId) loadStockTable(currentStockLocId);
 }
 
 async function loadStockTable(locId) {
   currentStockLocId = locId;
   const bar = document.getElementById('stock-locs');
-  const locs = state.locations.filter(l => l.email);
-  bar.innerHTML = locs.map(l =>
-    `<button class="btn btn-sm ${l.id===locId?'btn-primary':'btn-outline-primary'}" onclick="loadStockTable(${l.id})">${esc(l.name)}</button>`
-  ).join('');
+  bar.innerHTML = stockLocButtons(locId);
   const body = document.getElementById('stock-body');
   const loc = state.locations.find(l => l.id === locId);
+  if (isJardin(locId)) { await renderJardinStock(body); return; }
   body.innerHTML = `<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>
     Calculando consumo de ${esc(loc.name)}... <span id="conteo-progress"></span>
     <div class="small mt-1">La primera vez tarda ~1 minuto (lee todas las recetas); después es rápido.</div></div>`;
@@ -2502,8 +2528,9 @@ function trFind(list, name) {
 }
 
 function initTransferView() {
-  const locs = state.locations.filter(l => l.email);
-  const opts = locs.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('');
+  ensureJardinLoc();
+  const locs = state.locations.filter(l => l.email || l.virtual);
+  const opts = locs.map(l => `<option value="${l.id}">${esc(l.name)}${l.virtual ? ' (depósito compartido)' : ''}</option>`).join('');
   const selF = document.getElementById('tr-from'), selT = document.getElementById('tr-to');
   if (!selF.options.length) {
     selF.innerHTML = '<option value="">— Origen —</option>' + opts;
@@ -2530,6 +2557,16 @@ async function loadTransferIngs() {
   dl.innerHTML = '';
   if (!locId) return;
   const st = document.getElementById('tr-status');
+  if (isJardin(locId)) {
+    // Origen Jardín: se eligen los productos del depósito (en bultos, como vinieron en la factura)
+    const inv = await jardinInventory();
+    const prods = [];
+    for (const comp of Object.keys(inv)) for (const p of Object.values(inv[comp])) if (p.qty > 0.001) prods.push({ ...p, comp });
+    window.__trJardinProds = prods;
+    dl.innerHTML = prods.map(p => `<option value="${esc(p.desc)}">${esc(p.comp)} · ${p.qty} ${esc(p.unit)}</option>`).join('');
+    st.innerHTML = '<span class="text-muted">Origen Jardín: la cantidad va en <strong>bultos</strong> (como figura en la factura). Se descuenta de la empresa dueña del local de destino.</span>';
+    return;
+  }
   st.textContent = 'Cargando ingredientes del origen...';
   try {
     const loc = state.locations.find(l => l.id === locId);
@@ -2554,6 +2591,8 @@ async function submitTransfer() {
     qty: parseFloat(r.querySelector('.tr-qty').value)
   })).filter(x => x.name && x.qty > 0);
   if (!rows.length) { showToast('Agregá al menos un producto con cantidad.', 'warning'); return; }
+  if (isJardin(fromId)) { await submitTransferFromJardin(rows, toId, fecha); return; }
+  if (isJardin(toId)) { showToast('Para mandar mercadería a Jardín cargá la factura directamente en Jardín (con la empresa). Las transferencias salen desde Jardín hacia los locales.', 'warning'); return; }
   btn.disabled = true; st.textContent = 'Conectando con Nucleo...';
   try {
     const locF = state.locations.find(l => l.id === fromId);
@@ -2662,7 +2701,7 @@ async function loadTransfers() {
     else hist.innerHTML = `<table class="table table-sm mb-0"><thead class="table-light"><tr>
       <th class="ps-3">Fecha</th><th>De → A</th><th>Productos</th></tr></thead><tbody>` +
       [...list].reverse().slice(0,30).map(t => `<tr>
-        <td class="ps-3 small">${esc((t.date||'').split('-').reverse().join('/'))}${t.tipo==='devolucion'?' <span class="badge text-bg-light border">devolución</span>':t.tipo==='sindeuda'?' <span class="badge text-bg-light border">sin deuda</span>':''}</td>
+        <td class="ps-3 small">${esc((t.date||'').split('-').reverse().join('/'))}${t.tipo==='devolucion'?' <span class="badge text-bg-light border">devolución</span>':t.tipo==='sindeuda'?' <span class="badge text-bg-light border">sin deuda</span>':t.tipo==='jardin'?' <span class="badge text-bg-light border"><i class="bi bi-box-seam"></i> Jardín · '+esc(t.company||'')+'</span>':''}</td>
         <td class="small">${esc(t.fromName)} → ${esc(t.toName)}</td>
         <td class="small text-muted">${(t.items||[]).map(i => esc(i.name) + ' ×' + i.qty).join(', ')}</td>
       </tr>`).join('') + '</tbody></table>';
@@ -2670,7 +2709,7 @@ async function loadTransfers() {
     const debts = {};
     window.__debtPairs = [];
     for (const t of list) {
-      if (t.tipo === 'sindeuda') continue; // préstamo sin deuda: mueve stock pero no cuenta
+      if (t.tipo === 'sindeuda' || t.tipo === 'jardin') continue; // préstamo sin deuda / salida de Jardín: no generan deuda
       for (const i of (t.items||[])) {
         if (i.ok === false) continue;
         const key = trNorm(i.name);
@@ -2969,11 +3008,207 @@ async function markConteoDone() {
 
 
 // ── Empresas ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+// DEPÓSITO JARDÍN (compartido entre UN CORTADO SA y DE LOS CAFE SA)
+// No está en Nucleo: su stock se lleva acá, por empresa, en bultos de factura.
+// Entradas = facturas cargadas en Jardín (con empresa). Salidas = transferencias
+// desde Jardín hacia un local (se descuenta a la empresa dueña de ese local y
+// se suma el stock en el Nucleo del local, convertido con el mapeo de ese local).
+// ═══════════════════════════════════════════════════════════════════════
+const JARDIN_ID = 9000;
+function isJardin(locId) { return Number(locId) === JARDIN_ID; }
+function ensureJardinLoc() {
+  if (!Array.isArray(state.locations)) state.locations = [];
+  if (!state.locations.some(l => l.id === JARDIN_ID))
+    state.locations.push({ id: JARDIN_ID, name: 'Jardín', virtual: true, email: '', password: '', jwt: null });
+}
+function toggleCompanyWrap(selId, wrapId) {
+  const sel = document.getElementById(selId), wrap = document.getElementById(wrapId);
+  if (!sel || !wrap) return;
+  wrap.classList.toggle('d-none', !isJardin(sel.value));
+}
+function companyOfLoc(locId) {
+  const loc = state.locations.find(l => l.id === Number(locId));
+  return trEmpresa((loc || {}).name || '');
+}
+function jardinKey(code, desc) { return (code || '').trim() ? 'c:' + String(code).trim() : 'd:' + trNorm(desc); }
+
+// Inventario de Jardín por empresa: { 'UN CORTADO SA': { key: {code, desc, unit, qty, lastIn} }, ... }
+async function jardinInventory() {
+  const inv = { 'UN CORTADO SA': {}, 'DE LOS CAFE SA': {} };
+  const bump = (comp, code, desc, unit, qty, date) => {
+    if (!inv[comp]) inv[comp] = {};
+    const k = jardinKey(code, desc);
+    const p = inv[comp][k] || (inv[comp][k] = { code: code || '', desc: desc || '', unit: unit || 'CAJ', qty: 0, lastIn: '' });
+    p.qty = Math.round((p.qty + qty) * 1000) / 1000;
+    if (qty > 0 && date && date > p.lastIn) p.lastIn = date;
+    if (!p.code && code) p.code = code;
+  };
+  for (const f of (state.invoices || [])) {
+    if (!isJardin(f.locId) || f.status !== 'done' || !f.company) continue;
+    for (const it of (f.items || [])) if (it.quantity > 0) bump(f.company, it.code, it.description, it.unit, it.quantity, parseARDate(f.date) ? parseARDate(f.date).toISOString().slice(0,10) : '');
+  }
+  let transfers = window.__transfers;
+  if (!transfers) { try { transfers = await (await fetch('/api/transfers')).json(); window.__transfers = transfers; } catch (e) { transfers = []; } }
+  for (const t of transfers) {
+    if (t.tipo !== 'jardin' || !t.company) continue;
+    for (const i of (t.items || [])) if (i.ok !== false) bump(t.company, i.code, i.name, i.unit, -i.qty, '');
+  }
+  return inv;
+}
+
+// Panel lateral de la factura cuando el "local" es Jardín
+function renderJardinPanel(inv, panel) {
+  if (inv.status === 'done') {
+    panel.innerHTML = `<div class="alert alert-success small py-2"><i class="bi bi-check-circle me-1"></i>
+      Mercadería ingresada en <strong>Jardín</strong> para <strong>${esc(inv.company || '?')}</strong>
+      (${(inv.items||[]).length} artículos). Se ve en Stock → Jardín.</div>
+      <button class="btn btn-sm btn-outline-danger w-100" onclick="undoJardinIn(${inv.id})"><i class="bi bi-arrow-counterclockwise me-1"></i>Deshacer ingreso (para corregir)</button>`;
+    return;
+  }
+  const n = (inv.items || []).filter(it => it.quantity > 0).length;
+  panel.innerHTML = `<p class="small text-muted mb-2"><i class="bi bi-box-seam me-1"></i>
+      Jardín no está en Nucleo: esta factura <strong>no genera orden de compra</strong>. Al confirmar, los ${n} artículos
+      (en bultos, como figuran en la factura) quedan en el stock de Jardín de <strong>${esc(inv.company || '— elegí la empresa —')}</strong>
+      y la factura cuenta como gasto de esa empresa.</p>
+    <button class="btn w-100 text-white" style="background:#1a1a2e" onclick="confirmJardinIn(${inv.id})" ${inv.company ? '' : 'disabled'}>
+      <i class="bi bi-box-arrow-in-down me-1"></i>Ingresar a Jardín</button>`;
+}
+function confirmJardinIn(invId) {
+  const inv = state.invoices.find(i => i.id === invId); if (!inv) return;
+  inv.items = getItemsFromTable();
+  inv.company = document.getElementById('r-company').value || inv.company;
+  if (!inv.company) { showToast('Elegí la empresa dueña de la mercadería.', 'warning'); return; }
+  if (!inv.items.some(it => it.quantity > 0)) { showToast('No hay artículos con cantidad.', 'warning'); return; }
+  inv.status = 'done'; inv.jardinIn = new Date().toISOString();
+  saveState(); renderReview(invId);
+  showToast('Ingreso registrado en Jardín para ' + inv.company + '.', 'success');
+}
+function undoJardinIn(invId) {
+  const inv = state.invoices.find(i => i.id === invId); if (!inv) return;
+  if (!confirm('¿Deshacer el ingreso a Jardín de esta factura? El stock de Jardín se recalcula sin ella hasta que la vuelvas a ingresar.')) return;
+  inv.status = 'pending'; inv.jardinIn = null; saveState(); renderReview(invId);
+}
+
+// Stock → Jardín: una tabla por empresa
+async function renderJardinStock(body) {
+  body.innerHTML = '<div class="text-muted"><span class="spinner-border spinner-border-sm me-2"></span>Calculando stock de Jardín...</div>';
+  window.__transfers = null;
+  const inv = await jardinInventory();
+  const block = comp => {
+    const rows = Object.values(inv[comp] || {}).filter(p => Math.abs(p.qty) > 0.001).sort((a,b) => a.desc.localeCompare(b.desc));
+    const bultos = rows.reduce((s,p) => s + p.qty, 0);
+    return `<div class="card mb-3"><div class="card-header fw-semibold d-flex justify-content-between align-items-center" style="background:${comp==='UN CORTADO SA'?'#eef3ff':'#fff4e5'}">
+        <span><i class="bi bi-building me-2"></i>${esc(comp)}</span>
+        <span class="small text-muted fw-normal">${rows.length} productos · ${Math.round(bultos*100)/100} bultos</span></div>
+      <div class="card-body p-0">${rows.length ? `<table class="table table-sm table-hover mb-0">
+        <thead class="table-light"><tr><th class="ps-3">Código</th><th>Producto</th><th class="text-end">Cantidad</th><th>Unidad</th><th class="pe-3">Último ingreso</th></tr></thead>
+        <tbody>${rows.map(p => `<tr class="${p.qty < 0 ? 'table-danger' : ''}"><td class="ps-3 font-monospace small">${esc(p.code)}</td><td>${esc(p.desc)}</td>
+          <td class="text-end fw-semibold ${p.qty < 0 ? 'text-danger' : ''}">${p.qty.toLocaleString('es-AR')}</td><td class="small text-muted">${esc(p.unit)}</td>
+          <td class="pe-3 small text-muted">${p.lastIn ? p.lastIn.split('-').reverse().join('/') : '—'}</td></tr>`).join('')}</tbody></table>`
+        : '<div class="small text-muted p-3">Sin mercadería de esta empresa en Jardín.</div>'}</div></div>`;
+  };
+  body.innerHTML = `
+    <div class="alert alert-light border small py-2 mb-3"><i class="bi bi-box-seam me-1"></i>
+      <strong>Jardín</strong> es un depósito compartido y no está en Nucleo. El stock se calcula con las facturas cargadas en Jardín
+      (con su empresa) menos las transferencias desde Jardín hacia los locales. Las cantidades están en <strong>bultos de factura</strong>.</div>
+    ${block('UN CORTADO SA')}${block('DE LOS CAFE SA')}`;
+}
+
+// Transferencia desde Jardín hacia un local: descuenta en Jardín (empresa del local) y suma en el Nucleo del local
+async function submitTransferFromJardin(rows, toId, fecha) {
+  const st = document.getElementById('tr-status'), btn = document.getElementById('tr-submit');
+  const locT = state.locations.find(l => l.id === toId);
+  if (!locT || !locT.email) { showToast('Elegí un local de destino con Nucleo configurado.', 'warning'); return; }
+  const comp = companyOfLoc(toId);
+  btn.disabled = true; st.textContent = 'Revisando stock de Jardín y Nucleo de ' + locT.name + '...';
+  try {
+    window.__transfers = null;
+    const inv = await jardinInventory();
+    const stockComp = inv[comp] || {};
+    const jwtT = await getValidJwt(locT);
+    const rT = await nucleoReq('GET','IngredientStockFlow/FindIngredientsInWarehouse/?WarehouseId=1',null,jwtT);
+    const ingsT = rT.data?.Ingredients || [];
+    // Los ingredientes de NAVIDAD tienen como código el mismo código SAP de Bonafide en todos los locales
+    const il = await nucleoReq('GET','IngredientList/Find/',null,jwtT);
+    const byCode = {}; for (const g of ((il.data && (il.data.Ingredients || il.data)) || [])) if (g.Code) byCode[String(g.Code).trim()] = g.Id;
+    const maps = locMaps(toId);
+    const plan = [], errores = [];
+    for (const it of rows) {
+      const p = Object.values(stockComp).find(x => trNorm(x.desc) === trNorm(it.name) || x.desc.toLowerCase() === it.name.toLowerCase());
+      if (!p) { errores.push(`"${it.name}" no está en Jardín a nombre de ${comp}`); continue; }
+      if (it.qty > p.qty + 0.001) errores.push(`"${p.desc}": pedís ${it.qty} y hay ${p.qty} ${p.unit} de ${comp} en Jardín`);
+      // ingrediente en el Nucleo del destino: por mapeo del código (con factor bulto→unidad de stock) o por nombre
+      const m = p.code ? maps[p.code] : null;
+      let iT = m && m.ingId ? ingsT.find(i => i.IngredientId === m.ingId) : null;
+      let factor = m && m.factor ? m.factor : null;
+      if (!iT && p.code && byCode[p.code]) iT = ingsT.find(i => i.IngredientId === byCode[p.code]) || null;
+      if (!iT) { iT = trFind(ingsT, p.desc); }
+      if (!iT) { errores.push(`"${p.desc}" no tiene ingrediente equivalente en ${locT.name} (cargá una factura de ese producto en ${locT.name} para memorizar el mapeo)`); continue; }
+      if (!factor) { const g = suggestPerBulto(p.desc, iT.MeasurementUnitName || ''); factor = g > 0 ? g : null; }
+      if (!factor) { errores.push(`No sé cuántas unidades de stock tiene un bulto de "${p.desc}" en ${locT.name}`); continue; }
+      plan.push({ it, p, iT, factor, stockQty: Math.round(it.qty * factor * 1000) / 1000 });
+    }
+    if (errores.length) {
+      st.innerHTML = '<div class="alert alert-warning py-2 small mb-0">' + errores.map(esc).join('<br>') + '<br><strong>No se movió nada.</strong></div>';
+      btn.disabled = false; return;
+    }
+    window.__trPlan = { jardin: true, plan, locT, jwtT, fecha, comp };
+    st.innerHTML = `<div class="card border-primary"><div class="card-body p-2">
+      <div class="fw-semibold small mb-2"><i class="bi bi-eye me-1"></i>Revisá antes de confirmar (sale de Jardín · ${esc(comp)}):</div>
+      <table class="table table-sm small mb-2"><thead class="table-light"><tr><th>Se descuenta en Jardín</th><th class="text-end">Bultos</th><th>Se suma en ${esc(locT.name)}</th></tr></thead><tbody>
+      ${plan.map(x => `<tr><td class="text-danger">− ${esc(x.p.desc)}</td><td class="text-end fw-semibold">${x.it.qty}</td>
+        <td class="text-primary">+ ${esc(x.iT.IngredientName)} <span class="text-muted">(${x.stockQty.toLocaleString('es-AR')} ${esc(x.iT.MeasurementUnitName||'')})</span></td></tr>`).join('')}
+      </tbody></table>
+      <button class="btn btn-sm btn-primary" onclick="confirmTransferFromJardin()"><i class="bi bi-check2 me-1"></i>Confirmar</button>
+      <button class="btn btn-sm btn-outline-secondary ms-1" onclick="document.getElementById('tr-status').innerHTML='';window.__trPlan=null;">Cancelar</button>
+    </div></div>`;
+  } catch (e) {
+    st.innerHTML = `<div class="alert alert-danger py-2 small mb-0">Error: ${esc(e.message)}</div>`;
+  } finally { btn.disabled = false; }
+}
+async function confirmTransferFromJardin() {
+  const P = window.__trPlan; if (!P || !P.jardin) return;
+  const { plan, locT, jwtT, fecha, comp } = P;
+  const st = document.getElementById('tr-status'), btn = document.getElementById('tr-submit');
+  btn.disabled = true;
+  try {
+    const desc = `Transferencia Jardín (${comp}) → ${locT.name} ${fecha.split('-').reverse().join('/')}`;
+    const results = []; let n = 0;
+    for (const x of plan) {
+      n++; st.textContent = `Sumando ${n}/${plan.length}: ${x.iT.IngredientName}...`;
+      const body = { IngredientId: x.iT.IngredientId, FromWarehouseId: 1, Income: x.stockQty, Description: desc, ActionTypeId: 18, EntityTypeId: 23 };
+      let r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',body,jwtT);
+      let txt = JSON.stringify(r.data);
+      if ((r.status !== 200 || /HasErrors":true/.test(txt)) && /entera/.test(txt)) {
+        body.Income = Math.round(x.stockQty);
+        r = await nucleoReq('POST','IngredientStockFlow/SaveIngredientStockFlowMovement',body,jwtT); txt = JSON.stringify(r.data);
+      }
+      const ok = r.status === 200 && !/HasErrors":true/.test(txt);
+      results.push({ code: x.p.code, name: x.p.desc, qty: x.it.qty, unit: x.p.unit, ok, err: ok ? null : txt.slice(0,120) });
+    }
+    st.textContent = 'Guardando registro...';
+    await fetch('/api/transfer', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ date: fecha, tipo: 'jardin', company: comp, fromId: JARDIN_ID, fromName: 'Jardín', toId: locT.id, toName: locT.name,
+        items: results.map(r => ({ code: r.code, name: r.name, qty: r.qty, unit: r.unit, ok: r.ok })) }) });
+    const bad = results.filter(r => !r.ok);
+    st.innerHTML = bad.length
+      ? '<div class="alert alert-warning py-2 small mb-0">Aplicado con errores (esos ítems no se descontaron de Jardín):<br>' + bad.map(b => esc(b.name + ': ' + b.err)).join('<br>') + '</div>'
+      : `<div class="alert alert-success py-2 small mb-0"><i class="bi bi-check-circle me-1"></i>Listo: descontado de Jardín (${esc(comp)}) y sumado al stock de ${esc(locT.name)}.</div>`;
+    document.getElementById('tr-items').innerHTML = ''; addTransferRow();
+    window.__trPlan = null; window.__transfers = null;
+    loadTransfers();
+  } catch (e) {
+    st.innerHTML = `<div class="alert alert-danger py-2 small mb-0">Error: ${esc(e.message)}</div>`;
+  } finally { btn.disabled = false; }
+}
+
 const COMPANIES = [
   { name: 'UN CORTADO SA',  locs: ['palmas','unicenter','leloir'] },
   { name: 'DE LOS CAFE SA', locs: ['obligado','juramento'] },
 ];
 function companyOfInv(inv) {
+  if (inv.company) return inv.company;   // Jardín: la empresa se elige al cargar la factura
   const loc = state.locations.find(l => l.id === inv.locId);
   const n = ((loc||{}).name||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
   const c = COMPANIES.find(c => c.locs.some(k => n.includes(k)));
@@ -3678,7 +3913,9 @@ function populateLocationDropdowns() {
     sel.innerHTML = '<option value="">— Seleccioná el local —</option>' +
       state.locations.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('');
     if (prev) sel.value = prev;
-    if (!sel.dataset.supHook) { sel.dataset.supHook = '1'; sel.addEventListener('change', populateSupplierDropdown); }
+    if (!sel.dataset.supHook) { sel.dataset.supHook = '1'; sel.addEventListener('change', populateSupplierDropdown);
+      sel.addEventListener('change', () => toggleCompanyWrap('upload-location', 'upload-company-wrap')); }
+    toggleCompanyWrap('upload-location', 'upload-company-wrap');
   });
   populateSupplierDropdown();
 }
