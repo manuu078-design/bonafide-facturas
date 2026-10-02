@@ -588,8 +588,11 @@ class Handler(BaseHTTPRequestHandler):
             "tipo": str(data.get("tipo") or "prestamo"),
             "fromId": data.get("fromId"), "fromName": str(data.get("fromName"))[:80],
             "toId": data.get("toId"), "toName": str(data.get("toName"))[:80],
+            # Jardín (depósito compartido): empresa dueña de la mercadería que sale
+            "company": str(data.get("company") or "")[:40],
             "items": [{"name": str(i.get("name",""))[:80], "qty": float(i.get("qty") or 0),
-                       "unit": str(i.get("unit",""))[:30], "ok": bool(i.get("ok", True))}
+                       "unit": str(i.get("unit",""))[:30], "code": str(i.get("code") or "")[:20],
+                       "ok": bool(i.get("ok", True))}
                       for i in (data.get("items") or [])[:50]],
         }
         lst.append(rec)
